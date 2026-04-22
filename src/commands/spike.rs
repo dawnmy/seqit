@@ -5,8 +5,14 @@ use rand_chacha::ChaCha20Rng;
 use crate::{cli::SpikeArgs, formats::SeqFormat, io, pairs};
 
 pub fn run(args: SpikeArgs) -> Result<()> {
-    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref()).or_else(|| {
+        if paired_in2.is_some() || args.add2.is_some() {
+            args.input.as_deref()
+        } else {
+            None
+        }
+    });
     if let (Some(in1), Some(in2), Some(add2)) = (paired_in1, paired_in2, args.add2.as_deref()) {
         let t1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.compression)?;
         let t2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.compression)?;
@@ -25,7 +31,9 @@ pub fn run(args: SpikeArgs) -> Result<()> {
     }
 
     if paired_in1.is_some() || paired_in2.is_some() || args.add2.is_some() {
-        bail!("paired spike requires -i/-I (or --in1/--in2) and -a/-A together");
+        bail!(
+            "paired spike requires R1 + R2 target inputs and R1 + R2 spike-in inputs together (use -i/-I with -a/-A, or --in1/--in2 with --add/--add2)"
+        );
     }
     let input = args.input.as_deref();
     let fmt = SeqFormat::from_arg(&args.format).unwrap_or(SeqFormat::detect(input)?);

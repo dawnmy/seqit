@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 
@@ -26,7 +27,8 @@ pub fn run(args: GrepArgs) -> Result<()> {
         let mut o2 = Vec::new();
         let mut count = 0usize;
         let total = r1.len().min(r2.len());
-        for (idx, (a, b)) in r1.into_iter().zip(r2.into_iter()).enumerate() {
+        let progress = make_progress_bar(args.progress, total as u64);
+        for (a, b) in r1.into_iter().zip(r2.into_iter()) {
             let m1 = is_match(&a, &matcher, &args.by);
             let m2 = is_match(&b, &matcher, &args.by);
             let mut keep = if args.pair_mode == "both" {
@@ -44,7 +46,12 @@ pub fn run(args: GrepArgs) -> Result<()> {
                     o2.push(b);
                 }
             }
-            report_progress(args.progress, idx + 1, total);
+            if let Some(pb) = &progress {
+                pb.inc(1);
+            }
+        }
+        if let Some(pb) = &progress {
+            pb.finish_and_clear();
         }
         if args.count {
             println!("{count}");
@@ -69,19 +76,20 @@ pub fn run(args: GrepArgs) -> Result<()> {
     let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
     let recs = io::read_records(in_path, fmt, &args.io.compression)?;
     let selected: Vec<&SeqRecord> = if args.progress {
-        let mut out = Vec::new();
-        let total = recs.len();
-        for (idx, rec) in recs.iter().enumerate() {
-            let mut keep = is_match(rec, &matcher, &args.by);
-            if args.invert {
-                keep = !keep;
-            }
-            if keep {
-                out.push(rec);
-            }
-            report_progress(true, idx + 1, total);
-        }
-        out
+        let pb = make_progress_bar(true, recs.len() as u64).expect("progress bar is enabled");
+        let selected = recs
+            .par_iter()
+            .progress_with(pb.clone())
+            .filter(|r| {
+                let mut keep = is_match(r, &matcher, &args.by);
+                if args.invert {
+                    keep = !keep;
+                }
+                keep
+            })
+            .collect();
+        pb.finish_and_clear();
+        selected
     } else {
         recs.par_iter()
             .filter(|r| {
@@ -185,17 +193,17 @@ impl Matcher {
     }
 }
 
-fn report_progress(enabled: bool, processed: usize, total: usize) {
+fn make_progress_bar(enabled: bool, total: u64) -> Option<ProgressBar> {
     if !enabled || total == 0 {
-        return;
+        return None;
     }
-    const STEP: usize = 100_000;
-    if processed == total || processed % STEP == 0 {
-        eprintln!(
-            "grep progress: {processed}/{total} ({:.1}%)",
-            processed as f64 * 100.0 / total as f64
-        );
-    }
+    let pb = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .expect("valid progress template")
+            .progress_chars("=> "),
+    );
+    Some(pb)
 }
 
 fn is_match(rec: &SeqRecord, matcher: &Matcher, by: &SearchBy) -> bool {

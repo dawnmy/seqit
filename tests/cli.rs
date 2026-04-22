@@ -78,6 +78,40 @@ fn spike_single_runs() {
 }
 
 #[test]
+fn spike_supports_paired_short_i_i() {
+    let td = tempdir().unwrap();
+    let o1 = td.path().join("spike1.fq");
+    let o2 = td.path().join("spike2.fq");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "spike",
+            "-i",
+            "tests/data/a.fq",
+            "-I",
+            "tests/data/b.fq",
+            "-a",
+            "tests/data/a.fq",
+            "-A",
+            "tests/data/b.fq",
+            "-o",
+            o1.to_str().unwrap(),
+            "-O",
+            o2.to_str().unwrap(),
+            "-s",
+            "3",
+        ])
+        .assert()
+        .success();
+
+    let t1 = fs::read_to_string(o1).unwrap();
+    let t2 = fs::read_to_string(o2).unwrap();
+    assert!(t1.contains("@r1"));
+    assert!(t2.contains("/2"));
+}
+
+#[test]
 fn stats_tabular_runs() {
     Command::cargo_bin("seqit")
         .unwrap()
