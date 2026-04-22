@@ -2,13 +2,61 @@ use anyhow::{bail, Result};
 
 use crate::formats::SeqRecord;
 
-pub fn validate_pair_counts(r1: &[SeqRecord], r2: &[SeqRecord]) -> Result<()> {
-    if r1.len() != r2.len() {
-        bail!(
-            "paired inputs have mismatched record counts: {} vs {}",
-            r1.len(),
-            r2.len()
+pub fn prepare_paired_records(
+    mut r1: Vec<SeqRecord>,
+    mut r2: Vec<SeqRecord>,
+    allow_unpaired: bool,
+) -> Result<(Vec<SeqRecord>, Vec<SeqRecord>)> {
+    let mut invalid: Vec<String> = Vec::new();
+    let min_len = r1.len().min(r2.len());
+    for i in 0..min_len {
+        let a = pair_key(&r1[i].id);
+        let b = pair_key(&r2[i].id);
+        if a != b {
+            invalid.push(format!("pair {}: R1={} R2={}", i + 1, r1[i].id, r2[i].id));
+        }
+    }
+    if r1.len() > min_len {
+        for rec in r1.iter().skip(min_len).take(5) {
+            invalid.push(format!("unmatched in R1: {}", rec.id));
+        }
+    }
+    if r2.len() > min_len {
+        for rec in r2.iter().skip(min_len).take(5) {
+            invalid.push(format!("unmatched in R2: {}", rec.id));
+        }
+    }
+    let total_invalid = invalid.len();
+    if total_invalid > 0 {
+        let preview = invalid
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !allow_unpaired {
+            bail!(
+                "paired inputs contain {total_invalid} invalid/unpaired records; examples: {preview}. rerun with --allow-unpaired to continue"
+            );
+        }
+        eprintln!(
+            "warning: paired inputs contain {total_invalid} invalid/unpaired records; examples: {preview}. unpaired records will be skipped"
         );
     }
-    Ok(())
+
+    let mut out1 = Vec::new();
+    let mut out2 = Vec::new();
+    for (a, b) in r1.drain(..min_len).zip(r2.drain(..min_len)) {
+        if pair_key(&a.id) == pair_key(&b.id) {
+            out1.push(a);
+            out2.push(b);
+        }
+    }
+    Ok((out1, out2))
+}
+
+fn pair_key(id: &str) -> &str {
+    id.strip_suffix("/1")
+        .or_else(|| id.strip_suffix("/2"))
+        .unwrap_or(id)
 }

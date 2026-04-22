@@ -28,5 +28,7 @@ fn main() -> Result<()> {
         Commands::Sort(a) => commands::sort::run(a),
         Commands::Shuffle(a) => commands::shuffle::run(a),
         Commands::Spike(a) => commands::spike::run(a),
+        Commands::Head(a) => commands::head::run(a),
+        Commands::Tail(a) => commands::tail::run(a),
     }
 }

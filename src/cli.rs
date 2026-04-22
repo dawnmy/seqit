@@ -53,6 +53,10 @@ pub enum Commands {
     Shuffle(ShuffleArgs),
     #[command(about = "Spike reads/sequences from one dataset into another")]
     Spike(SpikeArgs),
+    #[command(about = "Print the first N records/pairs or first proportion")]
+    Head(HeadArgs),
+    #[command(about = "Print the last N records/pairs or last proportion")]
+    Tail(TailArgs),
 }
 
 impl Commands {
@@ -69,6 +73,8 @@ impl Commands {
             Commands::Sort(a) => a.io.threads,
             Commands::Shuffle(a) => a.io.threads,
             Commands::Spike(a) => a.threads,
+            Commands::Head(a) => a.io.threads,
+            Commands::Tail(a) => a.io.threads,
         }
     }
 }
@@ -306,6 +312,12 @@ pub struct GrepArgs {
     pub only_names: bool,
     #[arg(short = 'P', long = "pair-mode", default_value = "any", value_parser = ["any", "both"], help = "Pair selection mode")]
     pub pair_mode: String,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -335,16 +347,20 @@ pub struct SampleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
     #[arg(
-        short = '1',
-        long = "in1",
+        short = 'i',
+        long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
-    pub in1: Option<String>,
+    pub input1: Option<String>,
     #[arg(
-        short = '2',
-        long = "in2",
+        short = 'I',
+        long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
+    pub input2: Option<String>,
+    #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
+    pub in1: Option<String>,
+    #[arg(long = "in2", help = "Read 2 input file for paired-end mode")]
     pub in2: Option<String>,
     #[arg(
         short = 'O',
@@ -358,6 +374,12 @@ pub struct SampleArgs {
     pub rate: Option<f64>,
     #[arg(short = 's', long = "seed", default_value_t = 42, help = "Random seed")]
     pub seed: u64,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -372,16 +394,20 @@ pub struct RmdupArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
     #[arg(
-        short = '1',
-        long = "in1",
+        short = 'i',
+        long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
-    pub in1: Option<String>,
+    pub input1: Option<String>,
     #[arg(
-        short = '2',
-        long = "in2",
+        short = 'I',
+        long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
+    pub input2: Option<String>,
+    #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
+    pub in1: Option<String>,
+    #[arg(long = "in2", help = "Read 2 input file for paired-end mode")]
     pub in2: Option<String>,
     #[arg(
         short = 'O',
@@ -405,6 +431,12 @@ pub struct RmdupArgs {
     pub count_dup: bool,
     #[arg(short = 'm', long = "mark-dup", action = ArgAction::SetTrue, help = "Mark duplicate records in ID")]
     pub mark_dup: bool,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -412,16 +444,20 @@ pub struct RenameArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
     #[arg(
-        short = '1',
-        long = "in1",
+        short = 'i',
+        long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
-    pub in1: Option<String>,
+    pub input1: Option<String>,
     #[arg(
-        short = '2',
-        long = "in2",
+        short = 'I',
+        long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
+    pub input2: Option<String>,
+    #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
+    pub in1: Option<String>,
+    #[arg(long = "in2", help = "Read 2 input file for paired-end mode")]
     pub in2: Option<String>,
     #[arg(
         short = 'O',
@@ -454,6 +490,12 @@ pub struct RenameArgs {
     pub template: Option<String>,
     #[arg(short = 'k', long = "keep-pair-suffix", action = ArgAction::SetTrue, help = "Preserve /1 and /2 suffixes")]
     pub keep_pair_suffix: bool,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -500,10 +542,18 @@ pub struct ShuffleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
     #[arg(
-        short = '1',
-        long = "in1",
+        short = 'i',
+        long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
+    pub input1: Option<String>,
+    #[arg(
+        short = 'I',
+        long = "input2",
+        help = "Read 2 input file for paired-end mode"
+    )]
+    pub input2: Option<String>,
+    #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
     pub in1: Option<String>,
     #[arg(
         short = '2',
@@ -532,6 +582,12 @@ pub struct ShuffleArgs {
         help = "Memory budget before spilling to disk"
     )]
     pub mem: String,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -542,6 +598,14 @@ pub struct SpikeArgs {
         help = "Main input file (single-end mode)"
     )]
     pub input: Option<String>,
+    #[arg(long = "input1", help = "Read 1 input file for paired-end mode")]
+    pub input1: Option<String>,
+    #[arg(
+        short = 'I',
+        long = "input2",
+        help = "Read 2 input file for paired-end mode"
+    )]
+    pub input2: Option<String>,
     #[arg(short = 'a', long = "add", help = "Spike-in file (required)")]
     pub add: String,
     #[arg(
@@ -599,4 +663,86 @@ pub struct SpikeArgs {
         help = "Number of worker threads to use"
     )]
     pub threads: Option<usize>,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HeadArgs {
+    #[command(flatten)]
+    pub io: CommonIoArgs,
+    #[arg(
+        short = 'i',
+        long = "input",
+        help = "Read 1 input file for paired-end mode"
+    )]
+    pub input1: Option<String>,
+    #[arg(
+        short = 'I',
+        long = "input2",
+        help = "Read 2 input file for paired-end mode"
+    )]
+    pub input2: Option<String>,
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
+    pub output2: Option<String>,
+    #[arg(short = 'n', long = "num", help = "Number of records/pairs to keep")]
+    pub num: Option<usize>,
+    #[arg(
+        short = 'p',
+        long = "proportion",
+        help = "Proportion of records/pairs to keep in [0,1]"
+    )]
+    pub proportion: Option<f64>,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TailArgs {
+    #[command(flatten)]
+    pub io: CommonIoArgs,
+    #[arg(
+        short = 'i',
+        long = "input",
+        help = "Read 1 input file for paired-end mode"
+    )]
+    pub input1: Option<String>,
+    #[arg(
+        short = 'I',
+        long = "input2",
+        help = "Read 2 input file for paired-end mode"
+    )]
+    pub input2: Option<String>,
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
+    pub output2: Option<String>,
+    #[arg(short = 'n', long = "num", help = "Number of records/pairs to keep")]
+    pub num: Option<usize>,
+    #[arg(
+        short = 'p',
+        long = "proportion",
+        help = "Proportion of records/pairs to keep in [0,1]"
+    )]
+    pub proportion: Option<f64>,
+    #[arg(
+        long = "allow-unpaired",
+        action = ArgAction::SetTrue,
+        help = "Continue when paired reads are invalid; skip unpaired records"
+    )]
+    pub allow_unpaired: bool,
 }

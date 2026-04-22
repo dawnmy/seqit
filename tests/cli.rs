@@ -180,3 +180,99 @@ fn seq_supports_remove_gaps_and_seq_only() {
     let text = fs::read_to_string(out).unwrap();
     assert_eq!(text, "ACGT\n");
 }
+
+#[test]
+fn head_supports_num_and_paired_i_i() {
+    let td = tempdir().unwrap();
+    let o1 = td.path().join("head1.fq");
+    let o2 = td.path().join("head2.fq");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "head",
+            "-i",
+            "tests/data/a.fq",
+            "-I",
+            "tests/data/b.fq",
+            "-n",
+            "2",
+            "-o",
+            o1.to_str().unwrap(),
+            "-O",
+            o2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let t1 = fs::read_to_string(o1).unwrap();
+    let t2 = fs::read_to_string(o2).unwrap();
+    assert!(t1.contains("@r1"));
+    assert!(!t1.contains("@r3"));
+    assert!(t2.contains("@r2/2"));
+}
+
+#[test]
+fn tail_supports_proportion() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("tail.fa");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "tail",
+            "tests/data/a.fa",
+            "--format",
+            "fasta",
+            "-p",
+            "0.34",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains(">r3"));
+    assert!(!text.contains(">r1"));
+}
+
+#[test]
+fn paired_validation_reports_and_allows_override() {
+    let td = tempdir().unwrap();
+    let bad_r2 = td.path().join("bad2.fq");
+    fs::write(
+        &bad_r2,
+        "@x1/2\nAAAA\n+\nIIII\n@r2/2\nCCCC\n+\nIIII\n@r3/2\nGGGG\n+\nIIII\n",
+    )
+    .unwrap();
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "shuffle",
+            "-i",
+            "tests/data/a.fq",
+            "-I",
+            bad_r2.to_str().unwrap(),
+            "-o",
+            td.path().join("o1.fq").to_str().unwrap(),
+            "-O",
+            td.path().join("o2.fq").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("invalid/unpaired records"));
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "shuffle",
+            "-i",
+            "tests/data/a.fq",
+            "-I",
+            bad_r2.to_str().unwrap(),
+            "--allow-unpaired",
+            "-o",
+            td.path().join("ok1.fq").to_str().unwrap(),
+            "-O",
+            td.path().join("ok2.fq").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
