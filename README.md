@@ -48,7 +48,7 @@ Compression:
 
 Common options are unified across commands where relevant:
 
-- `-t, --threads`
+- `-t, --threads` (set worker thread count; applies to all commands including `stats` and `spike`)
 - `-o, --output`
 - `-O, --output2`
 - `-1, --in1`
@@ -62,9 +62,19 @@ Common options are unified across commands where relevant:
 ### stats
 
 ```bash
-seqit stats reads.fq.gz --tabular
+seqit stats reads.fq.gz
+seqit stats reads_1.fq.gz reads_2.fq.gz                # pretty table with TOTAL row
+seqit stats reads_1.fq.gz reads_2.fq.gz --per-file     # pretty table without TOTAL row
+seqit stats reads.fq.gz -T                              # TSV output
 seqit stats sample.fa --json
+seqit stats sample.fa -t 8
 ```
+
+`stats` output modes:
+
+- default: human-readable pretty table with ASCII borders
+- `-T, --tsv` (alias: `--tabular`): tab-separated output for scripting
+- `--json`: structured JSON output
 
 ### seq
 

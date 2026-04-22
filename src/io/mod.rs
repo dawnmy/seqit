@@ -98,21 +98,6 @@ pub fn write_records(
     }
 }
 
-pub fn stream_records<F>(
-    path: Option<&str>,
-    format: SeqFormat,
-    compression: &CompressionArg,
-    mut f: F,
-) -> Result<()>
-where
-    F: FnMut(SeqRecord) -> Result<()>,
-{
-    for rec in read_records(path, format, compression)? {
-        f(rec)?;
-    }
-    Ok(())
-}
-
 fn read_fasta(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
     let mut out = Vec::new();
     let fa = fasta::Reader::new(reader);

@@ -53,9 +53,6 @@ pub struct SeqRecord {
 }
 
 impl SeqRecord {
-    pub fn len(&self) -> usize {
-        self.seq.len()
-    }
     pub fn name(&self) -> String {
         match &self.desc {
             Some(d) => format!("{} {}", self.id, d),
