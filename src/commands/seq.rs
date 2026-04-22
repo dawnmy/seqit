@@ -140,7 +140,11 @@ fn write_output(args: &SeqArgs, fmt: SeqFormat, recs: &[crate::formats::SeqRecor
             continue;
         }
         if args.name {
-            write_line(&mut bw, &r.name())?;
+            if args.full_name {
+                write_line(&mut bw, &r.name())?;
+            } else {
+                write_line(&mut bw, &r.id)?;
+            }
             continue;
         }
 

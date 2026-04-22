@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::File,
     io::{BufRead, BufReader},
 };
@@ -15,7 +16,7 @@ use crate::{
 
 pub fn run(args: GrepArgs) -> Result<()> {
     let patterns = load_patterns(&args)?;
-    let matcher = Matcher::new(&patterns, &args)?;
+    let matcher = Matcher::new(&patterns, &args.by, &args)?;
 
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
@@ -24,7 +25,8 @@ pub fn run(args: GrepArgs) -> Result<()> {
         let mut o1 = Vec::new();
         let mut o2 = Vec::new();
         let mut count = 0usize;
-        for (a, b) in r1.into_iter().zip(r2.into_iter()) {
+        let total = r1.len().min(r2.len());
+        for (idx, (a, b)) in r1.into_iter().zip(r2.into_iter()).enumerate() {
             let m1 = is_match(&a, &matcher, &args.by);
             let m2 = is_match(&b, &matcher, &args.by);
             let mut keep = if args.pair_mode == "both" {
@@ -42,6 +44,7 @@ pub fn run(args: GrepArgs) -> Result<()> {
                     o2.push(b);
                 }
             }
+            report_progress(args.progress, idx + 1, total);
         }
         if args.count {
             println!("{count}");
@@ -65,16 +68,31 @@ pub fn run(args: GrepArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
     let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
     let recs = io::read_records(in_path, fmt, &args.io.compression)?;
-    let selected: Vec<&SeqRecord> = recs
-        .par_iter()
-        .filter(|r| {
-            let mut keep = is_match(r, &matcher, &args.by);
+    let selected: Vec<&SeqRecord> = if args.progress {
+        let mut out = Vec::new();
+        let total = recs.len();
+        for (idx, rec) in recs.iter().enumerate() {
+            let mut keep = is_match(rec, &matcher, &args.by);
             if args.invert {
                 keep = !keep;
             }
-            keep
-        })
-        .collect();
+            if keep {
+                out.push(rec);
+            }
+            report_progress(true, idx + 1, total);
+        }
+        out
+    } else {
+        recs.par_iter()
+            .filter(|r| {
+                let mut keep = is_match(r, &matcher, &args.by);
+                if args.invert {
+                    keep = !keep;
+                }
+                keep
+            })
+            .collect()
+    };
 
     if args.count {
         println!("{}", selected.len());
@@ -117,12 +135,14 @@ fn load_patterns(args: &GrepArgs) -> Result<Vec<String>> {
 
 enum Matcher {
     Regex(Vec<Regex>),
+    ExactCaseSensitive(HashSet<String>),
+    ExactCaseInsensitive(HashSet<String>),
     CaseSensitive(Vec<String>),
     CaseInsensitive(Vec<String>),
 }
 
 impl Matcher {
-    fn new(patterns: &[String], args: &GrepArgs) -> Result<Self> {
+    fn new(patterns: &[String], by: &SearchBy, args: &GrepArgs) -> Result<Self> {
         if args.regex {
             let regexes = patterns
                 .iter()
@@ -133,6 +153,12 @@ impl Matcher {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Self::Regex(regexes))
+        } else if matches!(by, SearchBy::Id) && args.ignore_case {
+            Ok(Self::ExactCaseInsensitive(
+                patterns.iter().map(|p| p.to_ascii_lowercase()).collect(),
+            ))
+        } else if matches!(by, SearchBy::Id) {
+            Ok(Self::ExactCaseSensitive(patterns.iter().cloned().collect()))
         } else if args.ignore_case {
             Ok(Self::CaseInsensitive(
                 patterns.iter().map(|p| p.to_ascii_lowercase()).collect(),
@@ -145,12 +171,30 @@ impl Matcher {
     fn is_match(&self, target: &str) -> bool {
         match self {
             Self::Regex(regexes) => regexes.iter().any(|re| re.is_match(target)),
+            Self::ExactCaseSensitive(patterns) => patterns.contains(target),
+            Self::ExactCaseInsensitive(patterns) => {
+                let lowered = target.to_ascii_lowercase();
+                patterns.contains(&lowered)
+            }
             Self::CaseSensitive(patterns) => patterns.iter().any(|p| target.contains(p)),
             Self::CaseInsensitive(patterns) => {
                 let lowered = target.to_ascii_lowercase();
                 patterns.iter().any(|p| lowered.contains(p))
             }
         }
+    }
+}
+
+fn report_progress(enabled: bool, processed: usize, total: usize) {
+    if !enabled || total == 0 {
+        return;
+    }
+    const STEP: usize = 100_000;
+    if processed == total || processed % STEP == 0 {
+        eprintln!(
+            "grep progress: {processed}/{total} ({:.1}%)",
+            processed as f64 * 100.0 / total as f64
+        );
     }
 }
 

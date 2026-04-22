@@ -156,6 +156,49 @@ fn seq_supports_quality_filters_and_only_id() {
 }
 
 #[test]
+fn seq_name_defaults_to_id_and_full_name_restores_header() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("named.fa");
+    let out_ids = td.path().join("ids.txt");
+    let out_full = td.path().join("full.txt");
+    fs::write(&input, ">r1 alpha desc\nACGT\n>r2\nTGCA\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "-n",
+            "-o",
+            out_ids.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&out_ids).unwrap(), "r1\nr2\n");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "-n",
+            "--full-name",
+            "-o",
+            out_full.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&out_full).unwrap(),
+        "r1 alpha desc\nr2\n"
+    );
+}
+
+#[test]
 fn seq_supports_remove_gaps_and_seq_only() {
     let td = tempdir().unwrap();
     let input = td.path().join("gapped.fa");
@@ -306,6 +349,40 @@ fn rename_supports_mapping_file() {
 }
 
 #[test]
+fn rename_map_file_matches_exact_ids_only() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("input.fa");
+    let map = td.path().join("map.tsv");
+    let out = td.path().join("mapped.fa");
+    fs::write(
+        &input,
+        ">SRR23973341.1228619\nACGT\n>SRR23973341.12286190\nTGCA\n",
+    )
+    .unwrap();
+    fs::write(&map, "SRR23973341.1228619\tTARGET\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rename",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--map-file",
+            map.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains(">TARGET"));
+    assert!(text.contains(">SRR23973341.12286190"));
+    assert!(!text.contains(">TARGET0"));
+}
+
+#[test]
 fn rename_supports_regex_replacement() {
     let td = tempdir().unwrap();
     let out = td.path().join("regex.fa");
@@ -450,4 +527,40 @@ fn grep_by_id_does_not_match_description_text() {
 
     let text = fs::read_to_string(out).unwrap();
     assert!(text.is_empty());
+}
+
+#[test]
+fn grep_by_id_pattern_file_matches_exact_ids() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("ids.fastq");
+    let patterns = td.path().join("ids.txt");
+    let out = td.path().join("out.fastq");
+    fs::write(
+        &input,
+        "@SRR23973341.1228619\nACGT\n+\nIIII\n@SRR23973341.12286190\nACGT\n+\nIIII\n@SRR23973341.5050320\nACGT\n+\nIIII\n",
+    )
+    .unwrap();
+    fs::write(&patterns, "SRR23973341.1228619\nSRR23973341.5050320\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "grep",
+            input.to_str().unwrap(),
+            "--format",
+            "fastq",
+            "-b",
+            "id",
+            "-f",
+            patterns.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains("@SRR23973341.1228619"));
+    assert!(text.contains("@SRR23973341.5050320"));
+    assert!(!text.contains("@SRR23973341.12286190"));
 }
