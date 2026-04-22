@@ -349,6 +349,40 @@ fn rename_supports_mapping_file() {
 }
 
 #[test]
+fn rename_map_file_matches_exact_ids_only() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("input.fa");
+    let map = td.path().join("map.tsv");
+    let out = td.path().join("mapped.fa");
+    fs::write(
+        &input,
+        ">SRR23973341.1228619\nACGT\n>SRR23973341.12286190\nTGCA\n",
+    )
+    .unwrap();
+    fs::write(&map, "SRR23973341.1228619\tTARGET\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rename",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--map-file",
+            map.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains(">TARGET"));
+    assert!(text.contains(">SRR23973341.12286190"));
+    assert!(!text.contains(">TARGET0"));
+}
+
+#[test]
 fn rename_supports_regex_replacement() {
     let td = tempdir().unwrap();
     let out = td.path().join("regex.fa");
