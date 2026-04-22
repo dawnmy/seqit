@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 
 use crate::cli::Fq2faArgs;
 use crate::formats::SeqFormat;
@@ -11,9 +12,9 @@ pub fn run(args: Fq2faArgs) -> Result<()> {
         bail!("fq2fa requires FASTQ input")
     }
     let mut recs = io::read_records(in_path, SeqFormat::Fastq, &args.io.compression)?;
-    for r in &mut recs {
+    recs.par_iter_mut().for_each(|r| {
         r.qual = None;
-    }
+    });
     io::write_records(
         &args.io.output,
         SeqFormat::Fasta,

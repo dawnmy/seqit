@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use anyhow::Result;
+use rayon::slice::ParallelSliceMut;
 
 use crate::{
     cli::{SortArgs, SortBy},
@@ -14,7 +15,7 @@ pub fn run(args: SortArgs) -> Result<()> {
     let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
     let _mem_limit_bytes = parse_mem_bytes(&args.mem);
     let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
-    recs.sort_by(|a, b| compare_records(a, b, &args.by, args.numeric));
+    recs.par_sort_by(|a, b| compare_records(a, b, &args.by, args.numeric));
     if args.reverse {
         recs.reverse();
     }

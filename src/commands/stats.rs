@@ -1,11 +1,53 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
+use rust_htslib::bam::{self, Read};
 use serde::Serialize;
 
 use crate::cli::StatsArgs;
 use crate::formats::SeqFormat;
 use crate::io;
+
+#[derive(Clone, Copy)]
+struct SeqAcc {
+    records: usize,
+    total_bases: usize,
+    min_len: usize,
+    max_len: usize,
+    gc: usize,
+}
+
+impl SeqAcc {
+    fn new() -> Self {
+        Self {
+            records: 0,
+            total_bases: 0,
+            min_len: usize::MAX,
+            max_len: 0,
+            gc: 0,
+        }
+    }
+
+    fn with_record(len: usize, gc: usize) -> Self {
+        Self {
+            records: 1,
+            total_bases: len,
+            min_len: len,
+            max_len: len,
+            gc,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            records: self.records + other.records,
+            total_bases: self.total_bases + other.total_bases,
+            min_len: self.min_len.min(other.min_len),
+            max_len: self.max_len.max(other.max_len),
+            gc: self.gc + other.gc,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Clone)]
 struct StatRow {
@@ -65,26 +107,28 @@ fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
         SeqFormat::Fasta | SeqFormat::Fastq => {
             let recs = io::read_records(Some(p), fmt, &crate::cli::CompressionArg::Auto)?;
             let lens: Vec<usize> = recs.par_iter().map(|r| r.seq.len()).collect();
-            let records = lens.len();
-            let total_bases: usize = lens.par_iter().sum();
-            let min_len = *lens.par_iter().min().unwrap_or(&0);
-            let max_len = *lens.par_iter().max().unwrap_or(&0);
+            let acc = recs
+                .par_iter()
+                .map(|r| {
+                    let len = r.seq.len();
+                    let gc = bytecount::count(&r.seq, b'G')
+                        + bytecount::count(&r.seq, b'g')
+                        + bytecount::count(&r.seq, b'C')
+                        + bytecount::count(&r.seq, b'c');
+                    SeqAcc::with_record(len, gc)
+                })
+                .reduce(SeqAcc::new, SeqAcc::merge);
+            let records = acc.records;
+            let total_bases = acc.total_bases;
+            let min_len = if records > 0 { acc.min_len } else { 0 };
+            let max_len = acc.max_len;
             let mean_len = if records > 0 {
                 total_bases as f64 / records as f64
             } else {
                 0.0
             };
-            let gc = recs
-                .par_iter()
-                .map(|r| {
-                    bytecount::count(&r.seq, b'G')
-                        + bytecount::count(&r.seq, b'g')
-                        + bytecount::count(&r.seq, b'C')
-                        + bytecount::count(&r.seq, b'c')
-                })
-                .sum::<usize>();
             let gc_pct = if total_bases > 0 {
-                (gc as f64) * 100.0 / (total_bases as f64)
+                (acc.gc as f64) * 100.0 / (total_bases as f64)
             } else {
                 0.0
             };
@@ -116,10 +160,57 @@ fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
                 n50: 0,
             })
         }
-        SeqFormat::Bam | SeqFormat::Cram => {
-            bail!("BAM/CRAM stats are not yet implemented in this build")
-        }
+        SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt),
     }
+}
+
+fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
+    let mut reader = bam::Reader::from_path(p)?;
+    let mut records = 0usize;
+    let mut total_bases = 0usize;
+    let mut min_len = usize::MAX;
+    let mut max_len = 0usize;
+    let mut gc = 0usize;
+    let mut lens = Vec::new();
+
+    for rec in reader.records() {
+        let rec = rec?;
+        let seq = rec.seq().as_bytes();
+        let len = seq.len();
+        records += 1;
+        total_bases += len;
+        min_len = min_len.min(len);
+        max_len = max_len.max(len);
+        gc += bytecount::count(&seq, b'G')
+            + bytecount::count(&seq, b'g')
+            + bytecount::count(&seq, b'C')
+            + bytecount::count(&seq, b'c');
+        lens.push(len);
+    }
+
+    let min_len = if records > 0 { min_len } else { 0 };
+    let mean_len = if records > 0 {
+        total_bases as f64 / records as f64
+    } else {
+        0.0
+    };
+    let gc_pct = if total_bases > 0 {
+        (gc as f64) * 100.0 / (total_bases as f64)
+    } else {
+        0.0
+    };
+
+    Ok(StatRow {
+        file: p.to_string(),
+        format: format!("{:?}", fmt).to_lowercase(),
+        records,
+        total_bases,
+        min_len,
+        max_len,
+        mean_len,
+        gc_pct,
+        n50: calc_n50(&lens),
+    })
 }
 
 fn aggregate_row(rows: &[StatRow]) -> StatRow {

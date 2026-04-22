@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use predicates::str::contains;
+use rust_htslib::bam;
 use std::fs;
 use tempfile::tempdir;
 
@@ -91,4 +93,39 @@ fn stats_pretty_table_runs() {
         .args(["stats", "tests/data/a.fa"])
         .assert()
         .success();
+}
+
+#[test]
+fn stats_supports_multiple_inputs() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "tests/data/a.fa", "tests/data/a.fq", "-T"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn stats_supports_bam_input() {
+    let td = tempdir().unwrap();
+    let bam_path = td.path().join("tiny.bam");
+
+    let mut header = bam::Header::new();
+    header.push_record(
+        bam::header::HeaderRecord::new(b"SQ")
+            .push_tag(b"SN", "chr1")
+            .push_tag(b"LN", 1000),
+    );
+    let mut writer = bam::Writer::from_path(&bam_path, &header, bam::Format::Bam).unwrap();
+    let mut rec = bam::Record::new();
+    let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(4)]);
+    rec.set(b"r1", Some(&cigar), b"ACGT", &[30, 30, 30, 30]);
+    writer.write(&rec).unwrap();
+    drop(writer);
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", bam_path.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("bam"));
 }

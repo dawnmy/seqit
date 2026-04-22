@@ -4,23 +4,43 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 
 use crate::{cli::LocateArgs, formats::SeqFormat, io};
 
 pub fn run(args: LocateArgs) -> Result<()> {
     let pats = load_patterns(&args)?;
+    let regexes = if args.regex {
+        Some(
+            pats.iter()
+                .map(|p| {
+                    RegexBuilder::new(p)
+                        .case_insensitive(args.ignore_case)
+                        .build()
+                })
+                .collect::<Result<Vec<Regex>, _>>()?,
+        )
+    } else {
+        None
+    };
+    let normalized_pats = if args.ignore_case && !args.regex {
+        Some(
+            pats.iter()
+                .map(|p| p.to_ascii_lowercase())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     let in_path = args.io.input.as_deref();
     let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
     let recs = io::read_records(in_path, fmt, &args.io.compression)?;
 
     for r in recs {
         let text = String::from_utf8_lossy(&r.seq).to_string();
-        for p in &pats {
-            if args.regex {
-                let re = RegexBuilder::new(p)
-                    .case_insensitive(args.ignore_case)
-                    .build()?;
+        for (idx, p) in pats.iter().enumerate() {
+            if let Some(regexes) = &regexes {
+                let re = &regexes[idx];
                 for m in re.find_iter(&text) {
                     emit(args.bed, &r.id, m.start(), m.end(), m.as_str());
                     if !args.all {
@@ -28,10 +48,10 @@ pub fn run(args: LocateArgs) -> Result<()> {
                     }
                 }
             } else {
-                let query = if args.ignore_case {
-                    p.to_ascii_lowercase()
+                let query = if let Some(normalized_pats) = &normalized_pats {
+                    normalized_pats[idx].as_str()
                 } else {
-                    p.clone()
+                    p.as_str()
                 };
                 let hay = if args.ignore_case {
                     text.to_ascii_lowercase()
@@ -39,7 +59,7 @@ pub fn run(args: LocateArgs) -> Result<()> {
                     text.clone()
                 };
                 let mut offset = 0usize;
-                while let Some(i) = hay[offset..].find(&query) {
+                while let Some(i) = hay[offset..].find(query) {
                     let s = offset + i;
                     let e = s + query.len();
                     emit(args.bed, &r.id, s, e, &text[s..e]);
