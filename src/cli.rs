@@ -75,13 +75,28 @@ impl Commands {
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct CommonIoArgs {
-    #[arg(value_name = "INPUT")]
+    #[arg(value_name = "INPUT", help = "Input file (default: stdin)")]
     pub input: Option<String>,
-    #[arg(short = 'o', long = "output", default_value = "-")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "-",
+        help = "Output file ('-' for stdout)"
+    )]
     pub output: String,
-    #[arg(long = "format", value_enum, default_value = "auto")]
+    #[arg(
+        long = "format",
+        value_enum,
+        default_value = "auto",
+        help = "Input/output format"
+    )]
     pub format: FormatArg,
-    #[arg(long = "compression", value_enum, default_value = "auto")]
+    #[arg(
+        long = "compression",
+        value_enum,
+        default_value = "auto",
+        help = "Output compression codec"
+    )]
     pub compression: CompressionArg,
     #[arg(
         short = 't',
@@ -89,13 +104,13 @@ pub struct CommonIoArgs {
         help = "Number of worker threads to use"
     )]
     pub threads: Option<usize>,
-    #[arg(long = "quiet", action = ArgAction::SetTrue)]
+    #[arg(long = "quiet", action = ArgAction::SetTrue, help = "Suppress non-error logging")]
     pub quiet: bool,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct StatsArgs {
-    #[arg(value_name = "INPUTS")]
+    #[arg(value_name = "INPUTS", help = "One or more input files")]
     pub inputs: Vec<String>,
     #[arg(
         short = 'T',
@@ -114,7 +129,7 @@ pub struct StatsArgs {
         help = "When multiple files are given, do not append a TOTAL summary row"
     )]
     pub per_file: bool,
-    #[arg(long = "format", value_enum, default_value = "auto")]
+    #[arg(long = "format", value_enum, default_value = "auto", help = "Input format")]
     pub format: FormatArg,
     #[arg(
         short = 't',
@@ -128,19 +143,27 @@ pub struct StatsArgs {
 pub struct SeqArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = 'm', long = "min-len")]
+    #[arg(
+        short = 'm',
+        long = "min-len",
+        help = "Keep only records with length >= N"
+    )]
     pub min_len: Option<usize>,
-    #[arg(short = 'M', long = "max-len")]
+    #[arg(
+        short = 'M',
+        long = "max-len",
+        help = "Keep only records with length <= N"
+    )]
     pub max_len: Option<usize>,
-    #[arg(short = 'r', long = "rev", action = ArgAction::SetTrue)]
+    #[arg(short = 'r', long = "rev", action = ArgAction::SetTrue, help = "Reverse sequence and quality order")]
     pub rev: bool,
-    #[arg(short = 'c', long = "comp", action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long = "comp", action = ArgAction::SetTrue, help = "Complement sequence bases")]
     pub comp: bool,
-    #[arg(short = 'R', long = "revcomp", action = ArgAction::SetTrue)]
+    #[arg(short = 'R', long = "revcomp", action = ArgAction::SetTrue, help = "Reverse-complement sequence and reverse quality")]
     pub revcomp: bool,
-    #[arg(short = 'u', long = "upper", action = ArgAction::SetTrue)]
+    #[arg(short = 'u', long = "upper", action = ArgAction::SetTrue, help = "Convert sequence to uppercase")]
     pub upper: bool,
-    #[arg(short = 'l', long = "lower", action = ArgAction::SetTrue)]
+    #[arg(short = 'l', long = "lower", action = ArgAction::SetTrue, help = "Convert sequence to lowercase")]
     pub lower: bool,
 }
 
@@ -162,29 +185,51 @@ pub enum SearchBy {
 pub struct GrepArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 'p', long = "pattern")]
+    #[arg(short = 'p', long = "pattern", help = "Pattern to match")]
     pub pattern: Option<String>,
-    #[arg(short = 'f', long = "pattern-file")]
+    #[arg(
+        short = 'f',
+        long = "pattern-file",
+        help = "File containing one pattern per line"
+    )]
     pub pattern_file: Option<String>,
-    #[arg(short = 'b', long = "by", value_enum, default_value = "id")]
+    #[arg(
+        short = 'b',
+        long = "by",
+        value_enum,
+        default_value = "id",
+        help = "Field to search"
+    )]
     pub by: SearchBy,
-    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue)]
+    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue, help = "Interpret pattern as regex")]
     pub regex: bool,
-    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue)]
+    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue, help = "Case-insensitive matching")]
     pub ignore_case: bool,
-    #[arg(short = 'v', long = "invert", action = ArgAction::SetTrue)]
+    #[arg(short = 'v', long = "invert", action = ArgAction::SetTrue, help = "Select non-matching records")]
     pub invert: bool,
-    #[arg(short = 'c', long = "count", action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long = "count", action = ArgAction::SetTrue, help = "Print count only")]
     pub count: bool,
-    #[arg(short = 'n', long = "only-names", action = ArgAction::SetTrue)]
+    #[arg(short = 'n', long = "only-names", action = ArgAction::SetTrue, help = "Print matching record names only")]
     pub only_names: bool,
-    #[arg(short = 'P', long = "pair-mode", default_value = "any", value_parser = ["any", "both"])]
+    #[arg(short = 'P', long = "pair-mode", default_value = "any", value_parser = ["any", "both"], help = "Pair selection mode")]
     pub pair_mode: String,
 }
 
@@ -192,17 +237,21 @@ pub struct GrepArgs {
 pub struct LocateArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = 'p', long = "pattern")]
+    #[arg(short = 'p', long = "pattern", help = "Pattern to locate")]
     pub pattern: Option<String>,
-    #[arg(short = 'f', long = "pattern-file")]
+    #[arg(
+        short = 'f',
+        long = "pattern-file",
+        help = "File containing one pattern per line"
+    )]
     pub pattern_file: Option<String>,
-    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue)]
+    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue, help = "Interpret pattern as regex")]
     pub regex: bool,
-    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue)]
+    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue, help = "Case-insensitive matching")]
     pub ignore_case: bool,
-    #[arg(short = 'a', long = "all", action = ArgAction::SetTrue)]
+    #[arg(short = 'a', long = "all", action = ArgAction::SetTrue, help = "Report all matches per record")]
     pub all: bool,
-    #[arg(short = 'B', long = "bed", action = ArgAction::SetTrue)]
+    #[arg(short = 'B', long = "bed", action = ArgAction::SetTrue, help = "Emit BED-like coordinates")]
     pub bed: bool,
 }
 
@@ -210,17 +259,29 @@ pub struct LocateArgs {
 pub struct SampleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 'n', long = "num")]
+    #[arg(short = 'n', long = "num", help = "Number of records/pairs to sample")]
     pub num: Option<usize>,
-    #[arg(short = 'r', long = "rate")]
+    #[arg(short = 'r', long = "rate", help = "Sampling rate in [0,1]")]
     pub rate: Option<f64>,
-    #[arg(short = 's', long = "seed", default_value_t = 42)]
+    #[arg(short = 's', long = "seed", default_value_t = 42, help = "Random seed")]
     pub seed: u64,
 }
 
@@ -235,21 +296,39 @@ pub enum DupBy {
 pub struct RmdupArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 'b', long = "by", value_enum, default_value = "full")]
+    #[arg(
+        short = 'b',
+        long = "by",
+        value_enum,
+        default_value = "full",
+        help = "Duplicate key"
+    )]
     pub by: DupBy,
-    #[arg(short = 'f', long = "keep-first", action = ArgAction::SetTrue)]
+    #[arg(short = 'f', long = "keep-first", action = ArgAction::SetTrue, help = "Keep first occurrence of duplicate")]
     pub keep_first: bool,
-    #[arg(short = 'l', long = "keep-last", action = ArgAction::SetTrue)]
+    #[arg(short = 'l', long = "keep-last", action = ArgAction::SetTrue, help = "Keep last occurrence of duplicate")]
     pub keep_last: bool,
-    #[arg(short = 'c', long = "count-dup", action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long = "count-dup", action = ArgAction::SetTrue, help = "Append duplicate count to ID")]
     pub count_dup: bool,
-    #[arg(short = 'm', long = "mark-dup", action = ArgAction::SetTrue)]
+    #[arg(short = 'm', long = "mark-dup", action = ArgAction::SetTrue, help = "Mark duplicate records in ID")]
     pub mark_dup: bool,
 }
 
@@ -257,21 +336,48 @@ pub struct RmdupArgs {
 pub struct RenameArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 'p', long = "prefix", default_value = "seq")]
+    #[arg(
+        short = 'p',
+        long = "prefix",
+        default_value = "seq",
+        help = "Prefix for generated IDs"
+    )]
     pub prefix: String,
-    #[arg(short = 's', long = "start", default_value_t = 1)]
+    #[arg(
+        short = 's',
+        long = "start",
+        default_value_t = 1,
+        help = "Starting index"
+    )]
     pub start: usize,
-    #[arg(short = 'w', long = "width", default_value_t = 6)]
+    #[arg(
+        short = 'w',
+        long = "width",
+        default_value_t = 6,
+        help = "Zero-pad width for index"
+    )]
     pub width: usize,
-    #[arg(short = 'e', long = "template")]
+    #[arg(short = 'e', long = "template", help = "Custom rename template")]
     pub template: Option<String>,
-    #[arg(short = 'k', long = "keep-pair-suffix", action = ArgAction::SetTrue)]
+    #[arg(short = 'k', long = "keep-pair-suffix", action = ArgAction::SetTrue, help = "Preserve /1 and /2 suffixes")]
     pub keep_pair_suffix: bool,
 }
 
@@ -287,15 +393,30 @@ pub enum SortBy {
 pub struct SortArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = 'b', long = "by", value_enum, default_value = "id")]
+    #[arg(
+        short = 'b',
+        long = "by",
+        value_enum,
+        default_value = "id",
+        help = "Sort key"
+    )]
     pub by: SortBy,
-    #[arg(short = 'n', long = "numeric", action = ArgAction::SetTrue)]
+    #[arg(short = 'n', long = "numeric", action = ArgAction::SetTrue, help = "Use numeric sort where applicable")]
     pub numeric: bool,
-    #[arg(short = 'r', long = "reverse", action = ArgAction::SetTrue)]
+    #[arg(short = 'r', long = "reverse", action = ArgAction::SetTrue, help = "Reverse sort order")]
     pub reverse: bool,
-    #[arg(short = 'T', long = "tmp-dir")]
+    #[arg(
+        short = 'T',
+        long = "tmp-dir",
+        help = "Temporary directory for external sort"
+    )]
     pub tmp_dir: Option<String>,
-    #[arg(short = 'm', long = "mem", default_value = "128M")]
+    #[arg(
+        short = 'm',
+        long = "mem",
+        default_value = "128M",
+        help = "Memory budget before spilling to disk"
+    )]
     pub mem: String,
 }
 
@@ -303,41 +424,99 @@ pub struct SortArgs {
 pub struct ShuffleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 's', long = "seed", default_value_t = 42)]
+    #[arg(short = 's', long = "seed", default_value_t = 42, help = "Random seed")]
     pub seed: u64,
-    #[arg(short = 'T', long = "tmp-dir")]
+    #[arg(
+        short = 'T',
+        long = "tmp-dir",
+        help = "Temporary directory for shuffle spill files"
+    )]
     pub tmp_dir: Option<String>,
-    #[arg(short = 'm', long = "mem", default_value = "128M")]
+    #[arg(
+        short = 'm',
+        long = "mem",
+        default_value = "128M",
+        help = "Memory budget before spilling to disk"
+    )]
     pub mem: String,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct SpikeArgs {
-    #[arg(short = 'i', long = "input")]
+    #[arg(
+        short = 'i',
+        long = "input",
+        help = "Main input file (single-end mode)"
+    )]
     pub input: Option<String>,
-    #[arg(short = 'a', long = "add")]
+    #[arg(short = 'a', long = "add", help = "Spike-in file (required)")]
     pub add: String,
-    #[arg(short = 'A', long = "add2")]
+    #[arg(
+        short = 'A',
+        long = "add2",
+        help = "Read 2 spike-in file for paired-end mode"
+    )]
     pub add2: Option<String>,
-    #[arg(short = '1', long = "in1")]
+    #[arg(
+        short = '1',
+        long = "in1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub in1: Option<String>,
-    #[arg(short = '2', long = "in2")]
+    #[arg(
+        short = '2',
+        long = "in2",
+        help = "Read 2 input file for paired-end mode"
+    )]
     pub in2: Option<String>,
-    #[arg(short = 'o', long = "output", default_value = "-")]
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "-",
+        help = "Output file ('-' for stdout)"
+    )]
     pub output: String,
-    #[arg(short = 'O', long = "output2")]
+    #[arg(
+        short = 'O',
+        long = "output2",
+        help = "Read 2 output file for paired-end mode"
+    )]
     pub output2: Option<String>,
-    #[arg(short = 's', long = "seed", default_value_t = 42)]
+    #[arg(short = 's', long = "seed", default_value_t = 42, help = "Random seed")]
     pub seed: u64,
-    #[arg(short = 'f', long = "format", value_enum, default_value = "auto")]
+    #[arg(
+        short = 'f',
+        long = "format",
+        value_enum,
+        default_value = "auto",
+        help = "Input/output format"
+    )]
     pub format: FormatArg,
-    #[arg(short = 'z', long = "compression", value_enum, default_value = "auto")]
+    #[arg(
+        short = 'z',
+        long = "compression",
+        value_enum,
+        default_value = "auto",
+        help = "Output compression codec"
+    )]
     pub compression: CompressionArg,
     #[arg(
         short = 't',
