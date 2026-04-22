@@ -79,7 +79,16 @@ fn spike_single_runs() {
 fn stats_tabular_runs() {
     Command::cargo_bin("seqit")
         .unwrap()
-        .args(["stats", "tests/data/a.fa", "--tabular"])
+        .args(["stats", "tests/data/a.fa", "-T"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn stats_pretty_table_runs() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "tests/data/a.fa"])
         .assert()
         .success();
 }

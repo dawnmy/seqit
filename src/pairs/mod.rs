@@ -12,11 +12,3 @@ pub fn validate_pair_counts(r1: &[SeqRecord], r2: &[SeqRecord]) -> Result<()> {
     }
     Ok(())
 }
-
-pub fn zip_pairs<'a>(
-    r1: &'a [SeqRecord],
-    r2: &'a [SeqRecord],
-) -> Result<Vec<(&'a SeqRecord, &'a SeqRecord)>> {
-    validate_pair_counts(r1, r2)?;
-    Ok(r1.iter().zip(r2.iter()).collect())
-}

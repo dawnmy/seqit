@@ -11,6 +11,11 @@ use cli::{Cli, Commands};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(threads) = cli.command.threads().filter(|&t| t > 0) {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global();
+    }
     match cli.command {
         Commands::Stats(a) => commands::stats::run(a),
         Commands::Seq(a) => commands::seq::run(a),

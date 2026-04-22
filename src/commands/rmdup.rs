@@ -77,7 +77,7 @@ fn hash_single(r: &SeqRecord, by: &DupBy) -> u64 {
 fn hash_pair(a: &SeqRecord, b: &SeqRecord, by: &DupBy) -> u64 {
     match by {
         DupBy::Id => hash64(&(a.id.as_str(), b.id.as_str())),
-        DupBy::Seq => hash64((&a.seq, &b.seq)),
+        DupBy::Seq => hash64(&(&a.seq, &b.seq)),
         DupBy::Full => hash64(&(
             a.id.as_str(),
             b.id.as_str(),

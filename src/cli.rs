@@ -31,17 +31,46 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(about = "Compute summary statistics for sequence files")]
     Stats(StatsArgs),
+    #[command(about = "Filter and transform sequences")]
     Seq(SeqArgs),
+    #[command(about = "Convert FASTQ to FASTA")]
     Fq2fa(Fq2faArgs),
+    #[command(about = "Search records by id/name/sequence/quality")]
     Grep(GrepArgs),
+    #[command(about = "Locate sequence motifs and report coordinates")]
     Locate(LocateArgs),
+    #[command(about = "Randomly sample records or pairs")]
     Sample(SampleArgs),
+    #[command(about = "Remove duplicate records or read pairs")]
     Rmdup(RmdupArgs),
+    #[command(about = "Rename record identifiers")]
     Rename(RenameArgs),
+    #[command(about = "Sort records by id/name/length/sequence")]
     Sort(SortArgs),
+    #[command(about = "Shuffle records or read pairs deterministically")]
     Shuffle(ShuffleArgs),
+    #[command(about = "Spike reads/sequences from one dataset into another")]
     Spike(SpikeArgs),
+}
+
+impl Commands {
+    pub fn threads(&self) -> Option<usize> {
+        match self {
+            Commands::Stats(a) => a.threads,
+            Commands::Seq(a) => a.io.threads,
+            Commands::Fq2fa(a) => a.io.threads,
+            Commands::Grep(a) => a.io.threads,
+            Commands::Locate(a) => a.io.threads,
+            Commands::Sample(a) => a.io.threads,
+            Commands::Rmdup(a) => a.io.threads,
+            Commands::Rename(a) => a.io.threads,
+            Commands::Sort(a) => a.io.threads,
+            Commands::Shuffle(a) => a.io.threads,
+            Commands::Spike(a) => a.threads,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args, Clone)]
@@ -54,7 +83,11 @@ pub struct CommonIoArgs {
     pub format: FormatArg,
     #[arg(long = "compression", value_enum, default_value = "auto")]
     pub compression: CompressionArg,
-    #[arg(short = 't', long = "threads")]
+    #[arg(
+        short = 't',
+        long = "threads",
+        help = "Number of worker threads to use"
+    )]
     pub threads: Option<usize>,
     #[arg(long = "quiet", action = ArgAction::SetTrue)]
     pub quiet: bool,
@@ -64,14 +97,30 @@ pub struct CommonIoArgs {
 pub struct StatsArgs {
     #[arg(value_name = "INPUTS")]
     pub inputs: Vec<String>,
-    #[arg(long = "tabular", action = ArgAction::SetTrue)]
-    pub tabular: bool,
-    #[arg(long = "json", action = ArgAction::SetTrue)]
+    #[arg(
+        short = 'T',
+        long = "tsv",
+        visible_alias = "tabular",
+        action = ArgAction::SetTrue,
+        help = "Output machine-friendly TSV instead of pretty table"
+    )]
+    pub tsv: bool,
+    #[arg(long = "json", action = ArgAction::SetTrue, help = "Output JSON")]
     pub json: bool,
-    #[arg(long = "per-file", action = ArgAction::SetTrue)]
+    #[arg(
+        long = "per-file",
+        action = ArgAction::SetTrue,
+        help = "When multiple files are given, do not append a TOTAL summary row"
+    )]
     pub per_file: bool,
     #[arg(long = "format", value_enum, default_value = "auto")]
     pub format: FormatArg,
+    #[arg(
+        short = 't',
+        long = "threads",
+        help = "Number of worker threads to use"
+    )]
+    pub threads: Option<usize>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -289,4 +338,10 @@ pub struct SpikeArgs {
     pub format: FormatArg,
     #[arg(long = "compression", value_enum, default_value = "auto")]
     pub compression: CompressionArg,
+    #[arg(
+        short = 't',
+        long = "threads",
+        help = "Number of worker threads to use"
+    )]
+    pub threads: Option<usize>,
 }
