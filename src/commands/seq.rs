@@ -1,4 +1,5 @@
 use anyhow::Result;
+use rayon::prelude::*;
 
 use crate::cli::SeqArgs;
 use crate::formats::SeqFormat;
@@ -9,13 +10,16 @@ pub fn run(args: SeqArgs) -> Result<()> {
     let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
     let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
 
-    recs.retain(|r| {
-        let len = r.seq.len();
-        args.min_len.map(|m| len >= m).unwrap_or(true)
-            && args.max_len.map(|m| len <= m).unwrap_or(true)
-    });
+    recs = recs
+        .into_par_iter()
+        .filter(|r| {
+            let len = r.seq.len();
+            args.min_len.map(|m| len >= m).unwrap_or(true)
+                && args.max_len.map(|m| len <= m).unwrap_or(true)
+        })
+        .collect();
 
-    for r in &mut recs {
+    recs.par_iter_mut().for_each(|r| {
         if args.revcomp {
             r.seq = crate::utils::revcomp(&r.seq);
             if let Some(q) = &mut r.qual {
@@ -38,7 +42,7 @@ pub fn run(args: SeqArgs) -> Result<()> {
         if args.lower {
             r.seq.make_ascii_lowercase();
         }
-    }
+    });
 
     io::write_records(&args.io.output, fmt, &args.io.compression, &recs)
 }

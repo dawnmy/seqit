@@ -105,9 +105,10 @@ pub struct StatsArgs {
         help = "Output machine-friendly TSV instead of pretty table"
     )]
     pub tsv: bool,
-    #[arg(long = "json", action = ArgAction::SetTrue, help = "Output JSON")]
+    #[arg(short = 'j', long = "json", action = ArgAction::SetTrue, help = "Output JSON")]
     pub json: bool,
     #[arg(
+        short = 'p',
         long = "per-file",
         action = ArgAction::SetTrue,
         help = "When multiple files are given, do not append a TOTAL summary row"
@@ -127,19 +128,19 @@ pub struct StatsArgs {
 pub struct SeqArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(long = "min-len")]
+    #[arg(short = 'm', long = "min-len")]
     pub min_len: Option<usize>,
-    #[arg(long = "max-len")]
+    #[arg(short = 'M', long = "max-len")]
     pub max_len: Option<usize>,
-    #[arg(long = "rev", action = ArgAction::SetTrue)]
+    #[arg(short = 'r', long = "rev", action = ArgAction::SetTrue)]
     pub rev: bool,
-    #[arg(long = "comp", action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long = "comp", action = ArgAction::SetTrue)]
     pub comp: bool,
-    #[arg(long = "revcomp", action = ArgAction::SetTrue)]
+    #[arg(short = 'R', long = "revcomp", action = ArgAction::SetTrue)]
     pub revcomp: bool,
-    #[arg(long = "upper", action = ArgAction::SetTrue)]
+    #[arg(short = 'u', long = "upper", action = ArgAction::SetTrue)]
     pub upper: bool,
-    #[arg(long = "lower", action = ArgAction::SetTrue)]
+    #[arg(short = 'l', long = "lower", action = ArgAction::SetTrue)]
     pub lower: bool,
 }
 
@@ -171,11 +172,11 @@ pub struct GrepArgs {
     pub pattern: Option<String>,
     #[arg(short = 'f', long = "pattern-file")]
     pub pattern_file: Option<String>,
-    #[arg(long = "by", value_enum, default_value = "id")]
+    #[arg(short = 'b', long = "by", value_enum, default_value = "id")]
     pub by: SearchBy,
-    #[arg(long = "regex", action = ArgAction::SetTrue)]
+    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue)]
     pub regex: bool,
-    #[arg(long = "ignore-case", action = ArgAction::SetTrue)]
+    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue)]
     pub ignore_case: bool,
     #[arg(short = 'v', long = "invert", action = ArgAction::SetTrue)]
     pub invert: bool,
@@ -183,7 +184,7 @@ pub struct GrepArgs {
     pub count: bool,
     #[arg(short = 'n', long = "only-names", action = ArgAction::SetTrue)]
     pub only_names: bool,
-    #[arg(long = "pair-mode", default_value = "any", value_parser = ["any", "both"])]
+    #[arg(short = 'P', long = "pair-mode", default_value = "any", value_parser = ["any", "both"])]
     pub pair_mode: String,
 }
 
@@ -195,13 +196,13 @@ pub struct LocateArgs {
     pub pattern: Option<String>,
     #[arg(short = 'f', long = "pattern-file")]
     pub pattern_file: Option<String>,
-    #[arg(long = "regex", action = ArgAction::SetTrue)]
+    #[arg(short = 'x', long = "regex", action = ArgAction::SetTrue)]
     pub regex: bool,
-    #[arg(long = "ignore-case", action = ArgAction::SetTrue)]
+    #[arg(short = 'i', long = "ignore-case", action = ArgAction::SetTrue)]
     pub ignore_case: bool,
-    #[arg(long = "all", action = ArgAction::SetTrue)]
+    #[arg(short = 'a', long = "all", action = ArgAction::SetTrue)]
     pub all: bool,
-    #[arg(long = "bed", action = ArgAction::SetTrue)]
+    #[arg(short = 'B', long = "bed", action = ArgAction::SetTrue)]
     pub bed: bool,
 }
 
@@ -240,15 +241,15 @@ pub struct RmdupArgs {
     pub in2: Option<String>,
     #[arg(short = 'O', long = "output2")]
     pub output2: Option<String>,
-    #[arg(long = "by", value_enum, default_value = "full")]
+    #[arg(short = 'b', long = "by", value_enum, default_value = "full")]
     pub by: DupBy,
-    #[arg(long = "keep-first", action = ArgAction::SetTrue)]
+    #[arg(short = 'f', long = "keep-first", action = ArgAction::SetTrue)]
     pub keep_first: bool,
-    #[arg(long = "keep-last", action = ArgAction::SetTrue)]
+    #[arg(short = 'l', long = "keep-last", action = ArgAction::SetTrue)]
     pub keep_last: bool,
-    #[arg(long = "count-dup", action = ArgAction::SetTrue)]
+    #[arg(short = 'c', long = "count-dup", action = ArgAction::SetTrue)]
     pub count_dup: bool,
-    #[arg(long = "mark-dup", action = ArgAction::SetTrue)]
+    #[arg(short = 'm', long = "mark-dup", action = ArgAction::SetTrue)]
     pub mark_dup: bool,
 }
 
@@ -262,15 +263,15 @@ pub struct RenameArgs {
     pub in2: Option<String>,
     #[arg(short = 'O', long = "output2")]
     pub output2: Option<String>,
-    #[arg(long = "prefix", default_value = "seq")]
+    #[arg(short = 'p', long = "prefix", default_value = "seq")]
     pub prefix: String,
-    #[arg(long = "start", default_value_t = 1)]
+    #[arg(short = 's', long = "start", default_value_t = 1)]
     pub start: usize,
-    #[arg(long = "width", default_value_t = 6)]
+    #[arg(short = 'w', long = "width", default_value_t = 6)]
     pub width: usize,
-    #[arg(long = "template")]
+    #[arg(short = 'e', long = "template")]
     pub template: Option<String>,
-    #[arg(long = "keep-pair-suffix", action = ArgAction::SetTrue)]
+    #[arg(short = 'k', long = "keep-pair-suffix", action = ArgAction::SetTrue)]
     pub keep_pair_suffix: bool,
 }
 
@@ -286,15 +287,15 @@ pub enum SortBy {
 pub struct SortArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
-    #[arg(long = "by", value_enum, default_value = "id")]
+    #[arg(short = 'b', long = "by", value_enum, default_value = "id")]
     pub by: SortBy,
-    #[arg(long = "numeric", action = ArgAction::SetTrue)]
+    #[arg(short = 'n', long = "numeric", action = ArgAction::SetTrue)]
     pub numeric: bool,
-    #[arg(long = "reverse", action = ArgAction::SetTrue)]
+    #[arg(short = 'r', long = "reverse", action = ArgAction::SetTrue)]
     pub reverse: bool,
-    #[arg(long = "tmp-dir")]
+    #[arg(short = 'T', long = "tmp-dir")]
     pub tmp_dir: Option<String>,
-    #[arg(long = "mem", default_value = "128M")]
+    #[arg(short = 'm', long = "mem", default_value = "128M")]
     pub mem: String,
 }
 
@@ -310,9 +311,9 @@ pub struct ShuffleArgs {
     pub output2: Option<String>,
     #[arg(short = 's', long = "seed", default_value_t = 42)]
     pub seed: u64,
-    #[arg(long = "tmp-dir")]
+    #[arg(short = 'T', long = "tmp-dir")]
     pub tmp_dir: Option<String>,
-    #[arg(long = "mem", default_value = "128M")]
+    #[arg(short = 'm', long = "mem", default_value = "128M")]
     pub mem: String,
 }
 
@@ -334,9 +335,9 @@ pub struct SpikeArgs {
     pub output2: Option<String>,
     #[arg(short = 's', long = "seed", default_value_t = 42)]
     pub seed: u64,
-    #[arg(long = "format", value_enum, default_value = "auto")]
+    #[arg(short = 'f', long = "format", value_enum, default_value = "auto")]
     pub format: FormatArg,
-    #[arg(long = "compression", value_enum, default_value = "auto")]
+    #[arg(short = 'z', long = "compression", value_enum, default_value = "auto")]
     pub compression: CompressionArg,
     #[arg(
         short = 't',
