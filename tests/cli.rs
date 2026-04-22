@@ -344,3 +344,110 @@ fn rename_help_includes_examples_and_template_placeholders() {
         .stdout(contains("--map-file id_map.tsv"))
         .stdout(contains("--match-regex '^sample_(\\\\d+)$'"));
 }
+
+#[test]
+fn grep_help_shows_numeric_paired_flags_only() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["grep", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("-1, --in1"))
+        .stdout(contains("-2, --in2"))
+        .stdout(contains("-i, --ignore-case"));
+}
+
+#[test]
+fn rename_supports_shortcuts_for_paired_and_mode_options() {
+    let td = tempdir().unwrap();
+    let o1 = td.path().join("rename1.fq");
+    let o2 = td.path().join("rename2.fq");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rename",
+            "-1",
+            "tests/data/a.fq",
+            "-2",
+            "tests/data/b.fq",
+            "-p",
+            "pair_",
+            "-M",
+            "generate",
+            "-k",
+            "-o",
+            o1.to_str().unwrap(),
+            "-O",
+            o2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let t1 = fs::read_to_string(o1).unwrap();
+    let t2 = fs::read_to_string(o2).unwrap();
+    assert!(t1.contains("@pair_000001/1"));
+    assert!(t2.contains("@pair_000001/2"));
+}
+
+#[test]
+fn grep_paired_pattern_file_trims_whitespace() {
+    let td = tempdir().unwrap();
+    let patterns = td.path().join("ids.txt");
+    let o1 = td.path().join("grep1.fq");
+    let o2 = td.path().join("grep2.fq");
+    fs::write(&patterns, "  r2  \n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "grep",
+            "-1",
+            "tests/data/a.fq",
+            "-2",
+            "tests/data/b.fq",
+            "-f",
+            patterns.to_str().unwrap(),
+            "-o",
+            o1.to_str().unwrap(),
+            "-O",
+            o2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let t1 = fs::read_to_string(o1).unwrap();
+    let t2 = fs::read_to_string(o2).unwrap();
+    assert!(t1.contains("@r2"));
+    assert!(t2.contains("@r2/2"));
+}
+
+#[test]
+fn grep_by_id_does_not_match_description_text() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("desc.fastq");
+    let out = td.path().join("out.fastq");
+    fs::write(
+        &input,
+        "@x1 SRR23973341.2/1\nACGT\n+\nIIII\n@y2 nohit\nTGCA\n+\nIIII\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "grep",
+            input.to_str().unwrap(),
+            "--format",
+            "fastq",
+            "-p",
+            "SRR23973341.2",
+            "-b",
+            "id",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.is_empty());
+}

@@ -91,12 +91,26 @@ pub fn run(args: GrepArgs) -> Result<()> {
 
 fn load_patterns(args: &GrepArgs) -> Result<Vec<String>> {
     if let Some(p) = &args.pattern {
-        return Ok(vec![p.clone()]);
+        let normalized = p.trim();
+        if normalized.is_empty() {
+            bail!("--pattern cannot be empty");
+        }
+        return Ok(vec![normalized.to_string()]);
     }
     if let Some(file) = &args.pattern_file {
         let f = File::open(file)?;
         let br = BufReader::new(f);
-        return Ok(br.lines().collect::<std::result::Result<Vec<_>, _>>()?);
+        let patterns = br
+            .lines()
+            .map(|line| line.map(|l| l.trim().to_string()))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>();
+        if patterns.is_empty() {
+            bail!("pattern file '{}' contains no non-empty patterns", file);
+        }
+        return Ok(patterns);
     }
     bail!("one of --pattern or --pattern-file is required")
 }
@@ -142,7 +156,8 @@ impl Matcher {
 
 fn is_match(rec: &SeqRecord, matcher: &Matcher, by: &SearchBy) -> bool {
     match by {
-        SearchBy::Id | SearchBy::Name => matcher.is_match(&rec.name()),
+        SearchBy::Id => matcher.is_match(&rec.id),
+        SearchBy::Name => matcher.is_match(&rec.name()),
         SearchBy::Seq => {
             let seq = String::from_utf8_lossy(&rec.seq);
             matcher.is_match(&seq)
