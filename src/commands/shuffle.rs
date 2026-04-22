@@ -7,8 +7,8 @@ use crate::{cli::ShuffleArgs, formats::SeqFormat, io, pairs};
 pub fn run(args: ShuffleArgs) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(args.seed);
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
-        let mut r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
-        let mut r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
+        let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
+        let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
         pairs::validate_pair_counts(&r1, &r2)?;
         let out2 = args
             .output2
