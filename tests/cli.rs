@@ -129,3 +129,54 @@ fn stats_supports_bam_input() {
         .success()
         .stdout(contains("bam"));
 }
+
+#[test]
+fn seq_supports_quality_filters_and_only_id() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("ids.txt");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            "tests/data/a.fq",
+            "--format",
+            "fastq",
+            "-q",
+            "40",
+            "-i",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, "r1\nr3\n");
+}
+
+#[test]
+fn seq_supports_remove_gaps_and_seq_only() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("gapped.fa");
+    let out = td.path().join("seqs.txt");
+    fs::write(&input, ">r1\nAC-G T.\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "-g",
+            "-s",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, "ACGT\n");
+}

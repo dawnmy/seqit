@@ -129,7 +129,12 @@ pub struct StatsArgs {
         help = "When multiple files are given, do not append a TOTAL summary row"
     )]
     pub per_file: bool,
-    #[arg(long = "format", value_enum, default_value = "auto", help = "Input format")]
+    #[arg(
+        long = "format",
+        value_enum,
+        default_value = "auto",
+        help = "Input format"
+    )]
     pub format: FormatArg,
     #[arg(
         short = 't',
@@ -165,6 +170,76 @@ pub struct SeqArgs {
     pub upper: bool,
     #[arg(short = 'l', long = "lower", action = ArgAction::SetTrue, help = "Convert sequence to lowercase")]
     pub lower: bool,
+    #[arg(
+        short = 'k',
+        long = "color",
+        action = ArgAction::SetTrue,
+        help = "Colorize sequence output with ANSI codes"
+    )]
+    pub color: bool,
+    #[arg(
+        short = 'G',
+        long = "gap-letters",
+        default_value = "- \t.",
+        help = "Gap letters to remove with -g/--remove-gaps"
+    )]
+    pub gap_letters: String,
+    #[arg(
+        short = 'Q',
+        long = "max-qual",
+        default_value_t = -1.0,
+        help = "Only keep reads with average quality <= N; -1 disables"
+    )]
+    pub max_qual: f64,
+    #[arg(
+        short = 'q',
+        long = "min-qual",
+        default_value_t = -1.0,
+        help = "Only keep reads with average quality >= N; -1 disables"
+    )]
+    pub min_qual: f64,
+    #[arg(
+        short = 'n',
+        long = "name",
+        action = ArgAction::SetTrue,
+        help = "Only print names (full headers)"
+    )]
+    pub name: bool,
+    #[arg(
+        short = 'i',
+        long = "only-id",
+        action = ArgAction::SetTrue,
+        help = "Only print IDs (header first token)"
+    )]
+    pub only_id: bool,
+    #[arg(
+        short = 'b',
+        long = "qual-ascii-base",
+        default_value_t = 33,
+        help = "ASCII base for qualities (usually 33)"
+    )]
+    pub qual_ascii_base: u8,
+    #[arg(
+        short = 'g',
+        long = "remove-gaps",
+        action = ArgAction::SetTrue,
+        help = "Remove gap letters configured by -G/--gap-letters"
+    )]
+    pub remove_gaps: bool,
+    #[arg(
+        short = 's',
+        long = "seq",
+        action = ArgAction::SetTrue,
+        help = "Only print sequences"
+    )]
+    pub seq: bool,
+    #[arg(
+        short = 'v',
+        long = "validate-seq",
+        action = ArgAction::SetTrue,
+        help = "Validate sequence characters against IUPAC nucleotide codes"
+    )]
+    pub validate_seq: bool,
 }
 
 #[derive(Debug, clap::Args)]
