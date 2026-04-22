@@ -10,10 +10,12 @@ pub fn run(args: SampleArgs) -> Result<()> {
     }
     let mut rng = ChaCha20Rng::seed_from_u64(args.seed);
 
-    if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
+    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
+    let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    if let (Some(in1), Some(in2)) = (paired_in1, paired_in2) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
         let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
-        pairs::validate_pair_counts(&r1, &r2)?;
+        let (r1, r2) = pairs::prepare_paired_records(r1, r2, args.allow_unpaired)?;
         let out2 = args
             .output2
             .as_deref()

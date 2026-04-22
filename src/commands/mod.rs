@@ -1,5 +1,6 @@
 pub mod fq2fa;
 pub mod grep;
+pub mod head;
 pub mod locate;
 pub mod rename;
 pub mod rmdup;
@@ -9,3 +10,4 @@ pub mod shuffle;
 pub mod sort;
 pub mod spike;
 pub mod stats;
+pub mod tail;

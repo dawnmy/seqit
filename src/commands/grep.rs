@@ -20,7 +20,7 @@ pub fn run(args: GrepArgs) -> Result<()> {
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
         let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
-        pairs::validate_pair_counts(&r1, &r2)?;
+        let (r1, r2) = pairs::prepare_paired_records(r1, r2, args.allow_unpaired)?;
         let mut o1 = Vec::new();
         let mut o2 = Vec::new();
         let mut count = 0usize;

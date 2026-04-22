@@ -5,17 +5,15 @@ use rand_chacha::ChaCha20Rng;
 use crate::{cli::SpikeArgs, formats::SeqFormat, io, pairs};
 
 pub fn run(args: SpikeArgs) -> Result<()> {
-    if let (Some(in1), Some(in2), Some(add2)) = (
-        args.in1.as_deref(),
-        args.in2.as_deref(),
-        args.add2.as_deref(),
-    ) {
+    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
+    let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    if let (Some(in1), Some(in2), Some(add2)) = (paired_in1, paired_in2, args.add2.as_deref()) {
         let t1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.compression)?;
         let t2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.compression)?;
         let a1 = io::read_records(Some(&args.add), SeqFormat::Fastq, &args.compression)?;
         let a2 = io::read_records(Some(add2), SeqFormat::Fastq, &args.compression)?;
-        pairs::validate_pair_counts(&t1, &t2)?;
-        pairs::validate_pair_counts(&a1, &a2)?;
+        let (t1, t2) = pairs::prepare_paired_records(t1, t2, args.allow_unpaired)?;
+        let (a1, a2) = pairs::prepare_paired_records(a1, a2, args.allow_unpaired)?;
         let out2 = args
             .output2
             .as_deref()
@@ -26,8 +24,8 @@ pub fn run(args: SpikeArgs) -> Result<()> {
         return Ok(());
     }
 
-    if args.in1.is_some() || args.in2.is_some() || args.add2.is_some() {
-        bail!("paired spike requires -1/-2 and -a/-A together");
+    if paired_in1.is_some() || paired_in2.is_some() || args.add2.is_some() {
+        bail!("paired spike requires -i/-I (or --in1/--in2) and -a/-A together");
     }
     let input = args.input.as_deref();
     let fmt = SeqFormat::from_arg(&args.format).unwrap_or(SeqFormat::detect(input)?);

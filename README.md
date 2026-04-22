@@ -19,6 +19,8 @@ Implemented commands:
 - `sort`
 - `shuffle`
 - `spike`
+- `head`
+- `tail`
 
 SAM parsing for `stats` (basic count) is available, while BAM/CRAM support is scaffolded for upcoming work.
 
@@ -51,8 +53,8 @@ Common options are unified across commands where relevant:
 - `-t, --threads` (set worker thread count; applies to all commands including `stats` and `spike`)
 - `-o, --output`
 - `-O, --output2`
-- `-1, --in1`
-- `-2, --in2`
+- `-i, --input` (paired read 1 for pair-aware commands)
+- `-I, --input2` (paired read 2 for pair-aware commands)
 - `-s, --seed`
 - `--format`
 - `--compression`
@@ -106,21 +108,21 @@ seqit locate reads.fa -p 'A[CT]G' --regex --bed
 
 ```bash
 seqit sample reads.fq -n 100000 -s 42 -o sub.fq
-seqit sample --in1 r1.fq --in2 r2.fq -r 0.1 -s 42 -o s1.fq -O s2.fq
+seqit sample -i r1.fq -I r2.fq -r 0.1 -s 42 -o s1.fq -O s2.fq
 ```
 
 ### rmdup
 
 ```bash
 seqit rmdup reads.fa --by seq --keep-first -o dedup.fa
-seqit rmdup --in1 r1.fq --in2 r2.fq --by full --mark-dup -o d1.fq -O d2.fq
+seqit rmdup -i r1.fq -I r2.fq --by full --mark-dup -o d1.fq -O d2.fq
 ```
 
 ### rename
 
 ```bash
 seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa
-seqit rename --in1 r1.fq --in2 r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq
+seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq
 ```
 
 ### sort
@@ -133,21 +135,30 @@ seqit sort reads.fa --by len --reverse -o sorted.fa
 
 ```bash
 seqit shuffle reads.fa -s 42 -o shuffled.fa
-seqit shuffle --in1 r1.fq --in2 r2.fq -s 42 -o shuf.r1.fq -O shuf.r2.fq
+seqit shuffle -i r1.fq -I r2.fq -s 42 -o shuf.r1.fq -O shuf.r2.fq
 ```
 
 ### spike
 
 ```bash
 seqit spike -i target.fa -a inserts.fa -s 123 -o spiked.fa
-seqit spike -1 target.r1.fq -2 target.r2.fq -a add.r1.fq -A add.r2.fq -s 123 -o out.r1.fq -O out.r2.fq
+seqit spike --input1 target.r1.fq -I target.r2.fq -a add.r1.fq -A add.r2.fq -s 123 -o out.r1.fq -O out.r2.fq
+```
+
+### head / tail
+
+```bash
+seqit head reads.fa -n 100 -o first100.fa
+seqit tail reads.fq -p 0.1 -o last10pct.fq
+seqit head -i r1.fq -I r2.fq -n 50000 -o h1.fq -O h2.fq
 ```
 
 ## Paired-end behavior
 
-Pair-aware commands (`grep`, `sample`, `rmdup`, `rename`, `shuffle`, `spike`) validate mate counts and preserve pair lockstep.
+Pair-aware commands (`grep`, `sample`, `rmdup`, `rename`, `shuffle`, `spike`, `head`, `tail`) validate mate IDs and preserve pair lockstep.
 
-- Any mismatch in paired input counts fails fast.
+- By default, invalid pairs fail fast with example read IDs and a total invalid count.
+- Use `--allow-unpaired` to continue and skip invalid/unpaired records.
 - Pair operations are done at pair granularity (not independent mates).
 
 ## Design notes
