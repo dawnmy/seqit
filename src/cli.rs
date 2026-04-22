@@ -208,9 +208,15 @@ pub struct SeqArgs {
         short = 'n',
         long = "name",
         action = ArgAction::SetTrue,
-        help = "Only print names (full headers)"
+        help = "Only print sequence IDs"
     )]
     pub name: bool,
+    #[arg(
+        long = "full-name",
+        action = ArgAction::SetTrue,
+        help = "With -n/--name, print full headers (ID + description) instead of IDs only"
+    )]
+    pub full_name: bool,
     #[arg(
         short = 'i',
         long = "only-id",
@@ -312,6 +318,12 @@ pub struct GrepArgs {
     pub only_names: bool,
     #[arg(short = 'P', long = "pair-mode", default_value = "any", value_parser = ["any", "both"], help = "Pair selection mode")]
     pub pair_mode: String,
+    #[arg(
+        long = "progress",
+        action = ArgAction::SetTrue,
+        help = "Show progress on stderr while scanning records"
+    )]
+    pub progress: bool,
     #[arg(
         long = "allow-unpaired",
         action = ArgAction::SetTrue,
