@@ -348,12 +348,14 @@ pub struct SampleArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
@@ -395,12 +397,14 @@ pub struct RmdupArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
@@ -448,12 +452,14 @@ pub struct RenameArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
@@ -496,24 +502,28 @@ pub struct RenameArgs {
     )]
     pub template: Option<String>,
     #[arg(
+        short = 'm',
         long = "map-file",
         value_name = "TSV",
         help = "Tab-separated mapping file: <old_id>\\t<new_id> (no header)"
     )]
     pub map_file: Option<String>,
     #[arg(
+        short = 'x',
         long = "match-regex",
         value_name = "PATTERN",
         help = "Regex pattern to match IDs for replacement mode"
     )]
     pub match_regex: Option<String>,
     #[arg(
+        short = 'r',
         long = "replace",
         value_name = "REPLACEMENT",
         help = "Replacement text for --match-regex (supports $1, $2, ... groups)"
     )]
     pub replace: Option<String>,
     #[arg(
+        short = 'M',
         long = "mode",
         value_enum,
         default_value = "auto",
@@ -583,23 +593,21 @@ pub struct ShuffleArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
     pub input2: Option<String>,
     #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
     pub in1: Option<String>,
-    #[arg(
-        short = '2',
-        long = "in2",
-        help = "Read 2 input file for paired-end mode"
-    )]
+    #[arg(long = "in2", help = "Read 2 input file for paired-end mode")]
     pub in2: Option<String>,
     #[arg(
         short = 'O',
@@ -717,12 +725,14 @@ pub struct HeadArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
@@ -755,12 +765,14 @@ pub struct TailArgs {
     pub io: CommonIoArgs,
     #[arg(
         short = 'i',
+        visible_short_alias = '1',
         long = "input",
         help = "Read 1 input file for paired-end mode"
     )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
+        visible_short_alias = '2',
         long = "input2",
         help = "Read 2 input file for paired-end mode"
     )]
