@@ -8,19 +8,19 @@ This foundation release focuses on robust FASTA/FASTQ handling with paired-end c
 
 Implemented commands:
 
-- `stats`
-- `seq`
-- `fq2fa`
-- `grep`
-- `locate`
-- `sample`
-- `rmdup`
-- `rename`
-- `sort`
-- `shuffle`
-- `spike`
-- `head`
-- `tail`
+- `stats` – per-file and aggregate summary metrics.
+- `seq` – general sequence filtering/transformation (length, quality, casing, reverse/comp, etc.).
+- `fq2fa` – FASTQ to FASTA conversion.
+- `grep` – pattern filtering on id/name/seq/qual, including pair-aware selection.
+- `locate` – motif coordinate reporting.
+- `sample` – random fixed-count or rate sampling.
+- `rmdup` – duplicate removal/marking.
+- `rename` – ID renaming (sequential, mapping-file, regex replacement).
+- `sort` – sorting by ID/name/length/sequence.
+- `shuffle` – deterministic random shuffling.
+- `spike` – spike-in records from another dataset.
+- `head` – keep first N or first proportion.
+- `tail` – keep last N or last proportion.
 
 SAM parsing for `stats` (basic count) is available, while BAM/CRAM support is scaffolded for upcoming work.
 
@@ -84,6 +84,10 @@ seqit stats sample.fa -t 8
 seqit seq reads.fa --min-len 75 --revcomp -o filtered.fa
 ```
 
+Notes:
+- `--min-qual/-q` and `--max-qual/-Q` are disabled by default with `-1` (not `-2`).
+- Use `--name`, `--only-id`, or `--seq` for text-only projections.
+
 ### fq2fa
 
 ```bash
@@ -123,7 +127,28 @@ seqit rmdup -i r1.fq -I r2.fq --by full --mark-dup -o d1.fq -O d2.fq
 ```bash
 seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa
 seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq
+seqit rename reads.fa -e 'lib_{n}_{prefix}' -p r -w 4 -o renamed.fa
+seqit rename reads.fa --map-file id_map.tsv -o renamed.by_map.fa
+seqit rename reads.fa --match-regex '^sample_(\d+)$' --replace 'S$1' -o renamed.by_regex.fa
 ```
+
+`rename` modes:
+
+- **Generate mode** (default): build IDs from `--prefix`, `--start`, `--width`, optional `--template`.
+  - Template placeholders:
+    - `{prefix}`: value from `--prefix`
+    - `{n}`: zero-padded index based on `--start`/`--width`
+- **Map mode**: `--map-file <TSV>`
+  - File format: **exactly two tab-separated columns, no header**.
+  - Column 1: existing ID, column 2: replacement ID.
+  - Unmatched IDs are kept unchanged.
+- **Regex mode**: `--match-regex <PATTERN> --replace <REPLACEMENT>`
+  - Uses Rust regex syntax.
+  - Replacement supports capture groups like `$1`, `$2`, etc.
+
+Mode selection:
+- `--mode auto` (default): picks map mode when `--map-file` is set, regex mode when `--match-regex/--replace` are set, otherwise generate mode.
+- You can force with `--mode generate|map|regex`.
 
 ### sort
 

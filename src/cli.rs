@@ -440,6 +440,9 @@ pub struct RmdupArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa\n      # Generate IDs: sample_000001, sample_000002, ...\n\n  seqit rename reads.fa -e 'lib_PREFIX_N' -p r -w 4 -o renamed.fa\n      # Template supports prefix and index placeholders (see README for exact syntax)\n\n  seqit rename reads.fa --map-file id_map.tsv -o renamed.fa\n      # Exact ID mapping from a 2-column TSV: <old_id>\\t<new_id>\n\n  seqit rename reads.fa --match-regex '^sample_(\\\\d+)$' --replace 'S$1' -o renamed.fa\n      # Regex-based ID rewrite with capture groups\n\n  seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq\n      # Paired-end renaming while preserving /1 and /2 suffixes"
+)]
 pub struct RenameArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -486,8 +489,37 @@ pub struct RenameArgs {
         help = "Zero-pad width for index"
     )]
     pub width: usize,
-    #[arg(short = 'e', long = "template", help = "Custom rename template")]
+    #[arg(
+        short = 'e',
+        long = "template",
+        help = "Custom template for generated IDs (supports prefix/index placeholders; see README)"
+    )]
     pub template: Option<String>,
+    #[arg(
+        long = "map-file",
+        value_name = "TSV",
+        help = "Tab-separated mapping file: <old_id>\\t<new_id> (no header)"
+    )]
+    pub map_file: Option<String>,
+    #[arg(
+        long = "match-regex",
+        value_name = "PATTERN",
+        help = "Regex pattern to match IDs for replacement mode"
+    )]
+    pub match_regex: Option<String>,
+    #[arg(
+        long = "replace",
+        value_name = "REPLACEMENT",
+        help = "Replacement text for --match-regex (supports $1, $2, ... groups)"
+    )]
+    pub replace: Option<String>,
+    #[arg(
+        long = "mode",
+        value_enum,
+        default_value = "auto",
+        help = "Rename mode: auto-detect, sequential generation, mapping, or regex replacement"
+    )]
+    pub mode: RenameMode,
     #[arg(short = 'k', long = "keep-pair-suffix", action = ArgAction::SetTrue, help = "Preserve /1 and /2 suffixes")]
     pub keep_pair_suffix: bool,
     #[arg(
@@ -496,6 +528,14 @@ pub struct RenameArgs {
         help = "Continue when paired reads are invalid; skip unpaired records"
     )]
     pub allow_unpaired: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum RenameMode {
+    Auto,
+    Generate,
+    Map,
+    Regex,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
