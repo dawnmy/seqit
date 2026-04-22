@@ -276,3 +276,71 @@ fn paired_validation_reports_and_allows_override() {
         .assert()
         .success();
 }
+
+#[test]
+fn rename_supports_mapping_file() {
+    let td = tempdir().unwrap();
+    let map = td.path().join("map.tsv");
+    let out = td.path().join("mapped.fa");
+    fs::write(&map, "r1\talpha\nr3\tgamma\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rename",
+            "tests/data/a.fa",
+            "--format",
+            "fasta",
+            "--map-file",
+            map.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains(">alpha"));
+    assert!(text.contains(">r2"));
+    assert!(text.contains(">gamma"));
+}
+
+#[test]
+fn rename_supports_regex_replacement() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("regex.fa");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rename",
+            "tests/data/a.fa",
+            "--format",
+            "fasta",
+            "--match-regex",
+            "^r(\\d+)$",
+            "--replace",
+            "seq_$1",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert!(text.contains(">seq_1"));
+    assert!(text.contains(">seq_2"));
+    assert!(text.contains(">seq_3"));
+}
+
+#[test]
+fn rename_help_includes_examples_and_template_placeholders() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["rename", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("Template supports prefix and index placeholders"))
+        .stdout(contains("--map-file id_map.tsv"))
+        .stdout(contains("--match-regex '^sample_(\\\\d+)$'"));
+}
