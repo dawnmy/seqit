@@ -1,0 +1,11 @@
+pub mod fq2fa;
+pub mod grep;
+pub mod locate;
+pub mod rename;
+pub mod rmdup;
+pub mod sample;
+pub mod seq;
+pub mod shuffle;
+pub mod sort;
+pub mod spike;
+pub mod stats;
