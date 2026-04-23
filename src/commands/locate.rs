@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
+use bio::io::{fasta, fastq};
 use regex::{Regex, RegexBuilder};
 
 use crate::cli::LocateArgs;
@@ -34,45 +35,82 @@ pub fn run(args: LocateArgs) -> Result<()> {
         None
     };
     let in_path = args.io.input.as_deref();
-    let (_fmt, recs) =
-        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
-
-    for r in recs {
-        let text = String::from_utf8_lossy(&r.seq).to_string();
-        for (idx, p) in pats.iter().enumerate() {
-            if let Some(regexes) = &regexes {
-                let re = &regexes[idx];
-                for m in re.find_iter(&text) {
-                    emit(args.bed, &r.id, m.start(), m.end(), m.as_str());
-                    if !args.all {
-                        break;
-                    }
-                }
-            } else {
-                let query = if let Some(normalized_pats) = &normalized_pats {
-                    normalized_pats[idx].as_str()
-                } else {
-                    p.as_str()
-                };
-                let hay = if args.ignore_case {
-                    text.to_ascii_lowercase()
-                } else {
-                    text.clone()
-                };
-                let mut offset = 0usize;
-                while let Some(i) = hay[offset..].find(query) {
-                    let s = offset + i;
-                    let e = s + query.len();
-                    emit(args.bed, &r.id, s, e, &text[s..e]);
-                    if !args.all {
-                        break;
-                    }
-                    offset = s + 1;
-                }
+    let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
+    match fmt {
+        crate::formats::SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for r in fa.records() {
+                let r = r?;
+                locate_in_record(
+                    r.id(),
+                    r.seq(),
+                    &pats,
+                    regexes.as_deref(),
+                    normalized_pats.as_deref(),
+                    &args,
+                );
             }
         }
+        crate::formats::SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for r in fq.records() {
+                let r = r?;
+                locate_in_record(
+                    r.id(),
+                    r.seq(),
+                    &pats,
+                    regexes.as_deref(),
+                    normalized_pats.as_deref(),
+                    &args,
+                );
+            }
+        }
+        _ => bail!("locate currently supports FASTA/FASTQ input"),
     }
     Ok(())
+}
+
+fn locate_in_record(
+    id: &str,
+    seq: &[u8],
+    pats: &[String],
+    regexes: Option<&[Regex]>,
+    normalized_pats: Option<&[String]>,
+    args: &LocateArgs,
+) {
+    let text = String::from_utf8_lossy(seq).to_string();
+    for (idx, p) in pats.iter().enumerate() {
+        if let Some(regexes) = regexes {
+            let re = &regexes[idx];
+            for m in re.find_iter(&text) {
+                emit(args.bed, id, m.start(), m.end(), m.as_str());
+                if !args.all {
+                    break;
+                }
+            }
+            continue;
+        }
+        let query = if let Some(normalized_pats) = normalized_pats {
+            normalized_pats[idx].as_str()
+        } else {
+            p.as_str()
+        };
+        let hay = if args.ignore_case {
+            text.to_ascii_lowercase()
+        } else {
+            text.clone()
+        };
+        let mut offset = 0usize;
+        while let Some(i) = hay[offset..].find(query) {
+            let s = offset + i;
+            let e = s + query.len();
+            emit(args.bed, id, s, e, &text[s..e]);
+            if !args.all {
+                break;
+            }
+            offset = s + 1;
+        }
+    }
 }
 
 fn emit(bed: bool, id: &str, s: usize, e: usize, m: &str) {

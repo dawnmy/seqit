@@ -3,6 +3,7 @@ use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read};
 use serde::Serialize;
+use std::io::BufRead;
 
 use crate::cli::StatsArgs;
 use crate::formats::SeqFormat;
@@ -53,6 +54,7 @@ impl SeqAcc {
 struct StatRow {
     file: String,
     format: String,
+    seq_type: String,
     records: usize,
     total_bases: usize,
     min_len: usize,
@@ -76,6 +78,14 @@ struct AllColumns {
     show_qx: bool,
 }
 
+#[derive(Default, Clone, Copy)]
+struct SeqTypeCounts {
+    alpha: usize,
+    non_nuc_alpha: usize,
+    u: usize,
+    t: usize,
+}
+
 pub fn run(args: StatsArgs) -> Result<()> {
     let inputs = if args.inputs.is_empty() {
         vec!["-".to_string()]
@@ -95,16 +105,19 @@ pub fn run(args: StatsArgs) -> Result<()> {
         if args.all {
             print_tsv_all_header(all_columns);
         } else {
-            println!("file\tformat\trecords\ttotal_bases\tmin_len\tmax_len\tmean_len\tgc_pct\tn50");
+            println!(
+                "file\tformat\ttype\trecords\ttotal_bases\tmin_len\tmax_len\tmean_len\tgc_pct\tn50"
+            );
         }
         for r in rows {
             if args.all {
                 println!("{}", tsv_all_row(&r, all_columns));
             } else {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}",
                     r.file,
                     r.format,
+                    r.seq_type,
                     r.records,
                     r.total_bases,
                     r.min_len,
@@ -126,60 +139,125 @@ pub fn run(args: StatsArgs) -> Result<()> {
 
 fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
     if p == "-" && matches!(args.format, crate::cli::FormatArg::Auto) {
-        let (fmt, recs) =
-            io::read_records_with_format(Some(p), &args.format, &crate::cli::CompressionArg::Auto)?;
-        return build_seq_row_from_records(p, fmt, recs);
+        return build_seq_row_streaming(p, &args.format);
     }
     let fmt = SeqFormat::from_arg_or_detect(&args.format, Some(p))?;
     match fmt {
-        SeqFormat::Fasta | SeqFormat::Fastq => {
-            let recs = io::read_records(Some(p), fmt, &crate::cli::CompressionArg::Auto)?;
-            build_seq_row_from_records(p, fmt, recs)
-        }
-        SeqFormat::Sam => {
-            let content = std::fs::read_to_string(p)?;
-            let records = content.lines().filter(|l| !l.starts_with('@')).count();
-            Ok(StatRow {
-                file: p.to_string(),
-                format: "sam".into(),
-                records,
-                total_bases: 0,
-                min_len: 0,
-                max_len: 0,
-                mean_len: 0.0,
-                gc_pct: 0.0,
-                n50: 0,
-                l50: 0,
-                q1_len: 0,
-                median_len: 0,
-                q3_len: 0,
-                n_pct: 0.0,
-                q10_pct: None,
-                q20_pct: None,
-                q30_pct: None,
-            })
-        }
+        SeqFormat::Fasta | SeqFormat::Fastq => build_seq_row_streaming(p, &args.format),
+        SeqFormat::Sam => build_sam_row_streaming(p),
         SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt),
     }
 }
 
-fn build_seq_row_from_records(
+fn build_seq_row_streaming(file: &str, format_arg: &crate::cli::FormatArg) -> Result<StatRow> {
+    let (fmt, br) = io::open_seq_reader(Some(file), format_arg, &crate::cli::CompressionArg::Auto)?;
+    match fmt {
+        SeqFormat::Fasta => build_fasta_row(file, br),
+        SeqFormat::Fastq => build_fastq_row(file, br),
+        _ => unreachable!("open_seq_reader only resolves fasta/fastq for stats sequence path"),
+    }
+}
+
+fn build_fasta_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
+    let fa = bio::io::fasta::Reader::new(reader);
+    let mut acc = SeqAcc::new();
+    let mut lens = Vec::new();
+    let mut n_bases = 0usize;
+    let mut type_counts = SeqTypeCounts::default();
+
+    for r in fa.records() {
+        let r = r?;
+        let seq = r.seq();
+        let len = seq.len();
+        acc = acc.merge(SeqAcc::with_record(
+            len,
+            bytecount::count(seq, b'G')
+                + bytecount::count(seq, b'g')
+                + bytecount::count(seq, b'C')
+                + bytecount::count(seq, b'c'),
+        ));
+        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
+        update_seq_type_counts(seq, &mut type_counts);
+        lens.push(len);
+    }
+
+    finalize_seq_row(
+        file,
+        SeqFormat::Fasta,
+        acc,
+        lens,
+        n_bases,
+        (None, None, None),
+        type_counts,
+    )
+}
+
+fn build_fastq_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
+    let fq = bio::io::fastq::Reader::new(reader);
+    let mut acc = SeqAcc::new();
+    let mut lens = Vec::new();
+    let mut n_bases = 0usize;
+    let mut q_ge_10 = 0usize;
+    let mut q_ge_20 = 0usize;
+    let mut q_ge_30 = 0usize;
+    let mut qual_bases = 0usize;
+    let mut type_counts = SeqTypeCounts::default();
+
+    for r in fq.records() {
+        let r = r?;
+        let seq = r.seq();
+        let len = seq.len();
+        acc = acc.merge(SeqAcc::with_record(
+            len,
+            bytecount::count(seq, b'G')
+                + bytecount::count(seq, b'g')
+                + bytecount::count(seq, b'C')
+                + bytecount::count(seq, b'c'),
+        ));
+        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
+        update_seq_type_counts(seq, &mut type_counts);
+        lens.push(len);
+
+        for q in r.qual().iter().copied() {
+            let phred = q.saturating_sub(33);
+            if phred >= 10 {
+                q_ge_10 += 1;
+            }
+            if phred >= 20 {
+                q_ge_20 += 1;
+            }
+            if phred >= 30 {
+                q_ge_30 += 1;
+            }
+            qual_bases += 1;
+        }
+    }
+
+    let q_pcts = (
+        Some(calc_pct(q_ge_10, qual_bases)),
+        Some(calc_pct(q_ge_20, qual_bases)),
+        Some(calc_pct(q_ge_30, qual_bases)),
+    );
+    finalize_seq_row(
+        file,
+        SeqFormat::Fastq,
+        acc,
+        lens,
+        n_bases,
+        q_pcts,
+        type_counts,
+    )
+}
+
+fn finalize_seq_row(
     file: &str,
     fmt: SeqFormat,
-    recs: Vec<crate::formats::SeqRecord>,
+    acc: SeqAcc,
+    lens: Vec<usize>,
+    n_bases: usize,
+    q_pcts: (Option<f64>, Option<f64>, Option<f64>),
+    type_counts: SeqTypeCounts,
 ) -> Result<StatRow> {
-    let lens: Vec<usize> = recs.par_iter().map(|r| r.seq.len()).collect();
-    let acc = recs
-        .par_iter()
-        .map(|r| {
-            let len = r.seq.len();
-            let gc = bytecount::count(&r.seq, b'G')
-                + bytecount::count(&r.seq, b'g')
-                + bytecount::count(&r.seq, b'C')
-                + bytecount::count(&r.seq, b'c');
-            SeqAcc::with_record(len, gc)
-        })
-        .reduce(SeqAcc::new, SeqAcc::merge);
     let records = acc.records;
     let total_bases = acc.total_bases;
     let min_len = if records > 0 { acc.min_len } else { 0 };
@@ -196,15 +274,12 @@ fn build_seq_row_from_records(
     };
     let (n50, l50) = calc_nx_lx(&lens, 50.0);
     let (q1_len, median_len, q3_len) = calc_quartiles(&lens);
-    let n_pct = calc_n_pct(&recs);
-    let (q10_pct, q20_pct, q30_pct) = if fmt == SeqFormat::Fastq {
-        calc_fastq_quality_pcts(&recs)
-    } else {
-        (None, None, None)
-    };
+    let n_pct = calc_pct(n_bases, total_bases);
+    let (q10_pct, q20_pct, q30_pct) = q_pcts;
     Ok(StatRow {
         file: file.to_string(),
         format: format!("{:?}", fmt).to_lowercase(),
+        seq_type: infer_seq_type(type_counts),
         records,
         total_bases,
         min_len,
@@ -223,6 +298,39 @@ fn build_seq_row_from_records(
     })
 }
 
+fn build_sam_row_streaming(p: &str) -> Result<StatRow> {
+    let r = io::open_reader(Some(p))?;
+    let r = io::wrap_decompress(r, Some(p), &crate::cli::CompressionArg::Auto)?;
+    let br = std::io::BufReader::new(r);
+    let mut records = 0usize;
+    for line in br.lines() {
+        let line = line?;
+        if !line.starts_with('@') {
+            records += 1;
+        }
+    }
+    Ok(StatRow {
+        file: p.to_string(),
+        format: "sam".into(),
+        seq_type: "NA".into(),
+        records,
+        total_bases: 0,
+        min_len: 0,
+        max_len: 0,
+        mean_len: 0.0,
+        gc_pct: 0.0,
+        n50: 0,
+        l50: 0,
+        q1_len: 0,
+        median_len: 0,
+        q3_len: 0,
+        n_pct: 0.0,
+        q10_pct: None,
+        q20_pct: None,
+        q30_pct: None,
+    })
+}
+
 fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
     let mut reader = bam::Reader::from_path(p)?;
     let mut records = 0usize;
@@ -236,6 +344,7 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
     let mut q_ge_30 = 0usize;
     let mut qual_bases = 0usize;
     let mut lens = Vec::new();
+    let mut type_counts = SeqTypeCounts::default();
 
     for rec in reader.records() {
         let rec = rec?;
@@ -250,6 +359,7 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
             + bytecount::count(&seq, b'C')
             + bytecount::count(&seq, b'c');
         n_bases += bytecount::count(&seq, b'N') + bytecount::count(&seq, b'n');
+        update_seq_type_counts(&seq, &mut type_counts);
         for q in rec.qual().iter() {
             let phred = q.saturating_sub(33);
             if phred >= 10 {
@@ -283,6 +393,7 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
     Ok(StatRow {
         file: p.to_string(),
         format: format!("{:?}", fmt).to_lowercase(),
+        seq_type: infer_seq_type(type_counts),
         records,
         total_bases,
         min_len,
@@ -338,6 +449,7 @@ fn aggregate_row(rows: &[StatRow]) -> StatRow {
     StatRow {
         file: "TOTAL".to_string(),
         format: "mixed".to_string(),
+        seq_type: "mixed".to_string(),
         records,
         total_bases,
         min_len,
@@ -361,6 +473,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
         let mut out = vec![
             "file".to_string(),
             "format".to_string(),
+            "type".to_string(),
             "records".to_string(),
             "total_bases".to_string(),
             "min_len".to_string(),
@@ -387,6 +500,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
         vec![
             "file".to_string(),
             "format".to_string(),
+            "type".to_string(),
             "records".to_string(),
             "total_bases".to_string(),
             "min_len".to_string(),
@@ -403,6 +517,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
                 let mut out = vec![
                     r.file.clone(),
                     r.format.clone(),
+                    r.seq_type.clone(),
                     r.records.to_formatted_string(&Locale::en),
                     r.total_bases.to_formatted_string(&Locale::en),
                     r.min_len.to_formatted_string(&Locale::en),
@@ -432,6 +547,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
                 vec![
                     r.file.clone(),
                     r.format.clone(),
+                    r.seq_type.clone(),
                     r.records.to_formatted_string(&Locale::en),
                     r.total_bases.to_formatted_string(&Locale::en),
                     r.min_len.to_formatted_string(&Locale::en),
@@ -516,6 +632,7 @@ fn print_tsv_all_header(columns: AllColumns) {
     let mut headers = vec![
         "file",
         "format",
+        "type",
         "records",
         "total_bases",
         "min_len",
@@ -540,6 +657,7 @@ fn tsv_all_row(r: &StatRow, columns: AllColumns) -> String {
     let mut fields = vec![
         r.file.clone(),
         r.format.clone(),
+        r.seq_type.clone(),
         r.records.to_string(),
         r.total_bases.to_string(),
         r.min_len.to_string(),
@@ -565,6 +683,38 @@ fn tsv_all_row(r: &StatRow, columns: AllColumns) -> String {
         ]);
     }
     fields.join("\t")
+}
+
+fn update_seq_type_counts(seq: &[u8], counts: &mut SeqTypeCounts) {
+    for b in seq.iter().copied() {
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
+        counts.alpha += 1;
+        let up = b.to_ascii_uppercase();
+        match up {
+            b'U' => counts.u += 1,
+            b'T' => counts.t += 1,
+            _ => {}
+        }
+        if !matches!(up, b'A' | b'C' | b'G' | b'T' | b'U' | b'N') {
+            counts.non_nuc_alpha += 1;
+        }
+    }
+}
+
+fn infer_seq_type(counts: SeqTypeCounts) -> String {
+    if counts.alpha == 0 {
+        return "NA".to_string();
+    }
+    let non_nuc_ratio = counts.non_nuc_alpha as f64 / counts.alpha as f64;
+    if non_nuc_ratio > 0.05 {
+        return "protein".to_string();
+    }
+    if counts.u > 0 && counts.t == 0 {
+        return "RNA".to_string();
+    }
+    "DNA".to_string()
 }
 
 fn calc_nx_lx(lens: &[usize], x: f64) -> (usize, usize) {
@@ -605,52 +755,6 @@ fn percentile(sorted: &[usize], pct: f64) -> usize {
     let n = sorted.len();
     let idx = (((pct / 100.0) * ((n - 1) as f64)).round()) as usize;
     sorted[idx]
-}
-
-fn calc_n_pct(recs: &[crate::formats::SeqRecord]) -> f64 {
-    let total: usize = recs.iter().map(|r| r.seq.len()).sum();
-    if total == 0 {
-        return 0.0;
-    }
-    let n_bases: usize = recs
-        .iter()
-        .map(|r| bytecount::count(&r.seq, b'N') + bytecount::count(&r.seq, b'n'))
-        .sum();
-    (n_bases as f64) * 100.0 / (total as f64)
-}
-
-fn calc_fastq_quality_pcts(
-    recs: &[crate::formats::SeqRecord],
-) -> (Option<f64>, Option<f64>, Option<f64>) {
-    let mut total = 0usize;
-    let mut q10 = 0usize;
-    let mut q20 = 0usize;
-    let mut q30 = 0usize;
-    for r in recs {
-        if let Some(qs) = &r.qual {
-            for q in qs {
-                let phred = q.saturating_sub(33);
-                if phred >= 10 {
-                    q10 += 1;
-                }
-                if phred >= 20 {
-                    q20 += 1;
-                }
-                if phred >= 30 {
-                    q30 += 1;
-                }
-                total += 1;
-            }
-        }
-    }
-    if total == 0 {
-        return (Some(0.0), Some(0.0), Some(0.0));
-    }
-    (
-        Some(calc_pct(q10, total)),
-        Some(calc_pct(q20, total)),
-        Some(calc_pct(q30, total)),
-    )
 }
 
 fn calc_pct(numerator: usize, denominator: usize) -> f64 {
