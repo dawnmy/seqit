@@ -24,6 +24,18 @@ fn fq2fa_works() {
     assert!(text.contains(">r1"));
 }
 
+
+#[test]
+fn fq2fa_respects_explicit_format_on_stdin() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["fq2fa", "--format", "fastq"])
+        .write_stdin("@r1\nACGT\n+\n!!!!\n")
+        .assert()
+        .success()
+        .stdout(contains(">r1\nACGT"));
+}
+
 #[test]
 fn paired_shuffle_is_deterministic() {
     let td = tempdir().unwrap();

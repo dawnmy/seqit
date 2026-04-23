@@ -36,7 +36,7 @@ pub fn run(args: SpikeArgs) -> Result<()> {
         );
     }
     let input = args.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.format).unwrap_or(SeqFormat::detect(input)?);
+    let fmt = SeqFormat::from_arg_or_detect(&args.format, input)?;
     let target = io::read_records(input, fmt, &args.compression)?;
     let add = io::read_records(Some(&args.add), fmt, &args.compression)?;
     let out = spike_single(target, add, args.seed);
