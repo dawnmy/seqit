@@ -129,6 +129,13 @@ pub struct StatsArgs {
     #[arg(short = 'j', long = "json", action = ArgAction::SetTrue, help = "Output JSON")]
     pub json: bool,
     #[arg(
+        short = 'a',
+        long = "all",
+        action = ArgAction::SetTrue,
+        help = "Enable extended assembly/read metrics (quartiles, L50, N%, and FASTQ Q10/Q20/Q30)"
+    )]
+    pub all: bool,
+    #[arg(
         short = 'p',
         long = "per-file",
         action = ArgAction::SetTrue,

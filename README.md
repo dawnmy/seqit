@@ -68,6 +68,9 @@ seqit stats reads.fq.gz
 seqit stats reads_1.fq.gz reads_2.fq.gz                # pretty table with TOTAL row
 seqit stats reads_1.fq.gz reads_2.fq.gz --per-file     # pretty table without TOTAL row
 seqit stats reads.fq.gz -T                              # TSV output
+seqit stats assembly.fa -a                              # extended metrics (Q1/median/Q3, N%, N50/L50)
+seqit stats reads.fq.gz -a                              # read metrics + Q10/Q20/Q30 (no N50/L50 columns)
+seqit stats assembly.fa reads.fq.gz -a                  # mixed types: shows both column groups with NA where not applicable
 seqit stats sample.fa --json
 seqit stats sample.fa -t 8
 ```
@@ -77,6 +80,7 @@ seqit stats sample.fa -t 8
 - default: human-readable pretty table with ASCII borders
 - `-T, --tsv` (alias: `--tabular`): tab-separated output for scripting
 - `--json`: structured JSON output
+- `-a, --all`: emit extended assembly/read metrics
 
 ### seq
 
