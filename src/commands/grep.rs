@@ -73,7 +73,7 @@ pub fn run(args: GrepArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
+    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
     let recs = io::read_records(in_path, fmt, &args.io.compression)?;
     let selected: Vec<&SeqRecord> = if args.progress {
         let pb = make_progress_bar(true, recs.len() as u64).expect("progress bar is enabled");

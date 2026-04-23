@@ -33,7 +33,7 @@ pub fn run(args: LocateArgs) -> Result<()> {
         None
     };
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
+    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
     let recs = io::read_records(in_path, fmt, &args.io.compression)?;
 
     for r in recs {

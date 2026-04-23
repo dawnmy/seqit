@@ -7,7 +7,7 @@ use crate::io;
 
 pub fn run(args: Fq2faArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
+    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
     if fmt != SeqFormat::Fastq {
         bail!("fq2fa requires FASTQ input")
     }
