@@ -6,7 +6,7 @@ use regex::Regex;
 use crate::{
     cli::{RenameArgs, RenameMode},
     formats::SeqFormat,
-    io, pairs,
+    io, pairs, utils,
 };
 
 pub fn run(args: RenameArgs) -> Result<()> {
@@ -35,6 +35,7 @@ pub fn run(args: RenameArgs) -> Result<()> {
 
     let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    utils::validate_input_mode("rename", args.io.input.as_deref(), paired_in1, paired_in2)?;
     if let (Some(in1), Some(in2)) = (paired_in1, paired_in2) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
         let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;

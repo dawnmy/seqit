@@ -2,10 +2,16 @@ use anyhow::{bail, Context, Result};
 use bio::io::{fasta, fastq};
 use std::io::BufReader;
 
-use crate::{cli::HeadArgs, formats::SeqFormat, io};
+use crate::{cli::HeadArgs, formats::SeqFormat, io, utils};
 
 pub fn run(args: HeadArgs) -> Result<()> {
     let n = resolve_take(args.num, args.proportion)?;
+    utils::validate_input_mode(
+        "head",
+        args.io.input.as_deref(),
+        args.input1.as_deref(),
+        args.input2.as_deref(),
+    )?;
     if let (Some(in1), Some(in2)) = (args.input1.as_deref(), args.input2.as_deref()) {
         let out2 = args
             .output2

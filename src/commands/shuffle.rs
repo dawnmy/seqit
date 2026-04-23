@@ -2,12 +2,13 @@ use anyhow::{Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
-use crate::{cli::ShuffleArgs, formats::SeqFormat, io, pairs};
+use crate::{cli::ShuffleArgs, formats::SeqFormat, io, pairs, utils};
 
 pub fn run(args: ShuffleArgs) -> Result<()> {
     let mut rng = ChaCha20Rng::seed_from_u64(args.seed);
     let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    utils::validate_input_mode("shuffle", args.io.input.as_deref(), paired_in1, paired_in2)?;
     if let (Some(in1), Some(in2)) = (paired_in1, paired_in2) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
         let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;

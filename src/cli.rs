@@ -666,12 +666,22 @@ pub struct ShuffleArgs {
 #[derive(Debug, clap::Args)]
 pub struct SpikeArgs {
     #[arg(
-        short = 'i',
-        long = "input",
-        help = "Main input file (single-end mode)"
+        value_name = "INPUT",
+        help = "Main input file for single-end mode (default: stdin)"
     )]
     pub input: Option<String>,
-    #[arg(long = "input1", help = "Read 1 input file for paired-end mode")]
+    #[arg(
+        long = "input",
+        hide = true,
+        help = "Deprecated alias for single-end main input; prefer positional INPUT"
+    )]
+    pub input_legacy: Option<String>,
+    #[arg(
+        short = 'i',
+        visible_short_alias = '1',
+        long = "input1",
+        help = "Read 1 input file for paired-end mode"
+    )]
     pub input1: Option<String>,
     #[arg(
         short = 'I',
@@ -687,17 +697,9 @@ pub struct SpikeArgs {
         help = "Read 2 spike-in file for paired-end mode"
     )]
     pub add2: Option<String>,
-    #[arg(
-        short = '1',
-        long = "in1",
-        help = "Read 1 input file for paired-end mode"
-    )]
+    #[arg(long = "in1", help = "Read 1 input file for paired-end mode")]
     pub in1: Option<String>,
-    #[arg(
-        short = '2',
-        long = "in2",
-        help = "Read 2 input file for paired-end mode"
-    )]
+    #[arg(long = "in2", help = "Read 2 input file for paired-end mode")]
     pub in2: Option<String>,
     #[arg(
         short = 'o',

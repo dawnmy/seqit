@@ -12,7 +12,7 @@ use regex::{Regex, RegexBuilder};
 use crate::{
     cli::{GrepArgs, SearchBy},
     formats::{SeqFormat, SeqRecord},
-    io, pairs,
+    io, pairs, utils,
 };
 
 pub fn run(args: GrepArgs) -> Result<()> {
@@ -36,6 +36,12 @@ pub fn run(args: GrepArgs) -> Result<()> {
         }
     }
     let matcher = Matcher::new(&patterns, &args.by, &args)?;
+    utils::validate_input_mode(
+        "grep",
+        args.io.input.as_deref(),
+        args.in1.as_deref(),
+        args.in2.as_deref(),
+    )?;
 
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;

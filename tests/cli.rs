@@ -95,7 +95,6 @@ fn spike_single_runs() {
         .unwrap()
         .args([
             "spike",
-            "-i",
             "tests/data/a.fa",
             "-a",
             "tests/data/a.fa",
@@ -188,6 +187,16 @@ fn sample_paired_num_streaming_runs() {
 }
 
 #[test]
+fn sample_rejects_partial_paired_flags() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["sample", "-i", "tests/data/a.fq", "-n", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("paired-end mode requires both read files"));
+}
+
+#[test]
 fn spike_supports_paired_short_i_i() {
     let td = tempdir().unwrap();
     let o1 = td.path().join("spike1.fq");
@@ -219,6 +228,49 @@ fn spike_supports_paired_short_i_i() {
     let t2 = fs::read_to_string(o2).unwrap();
     assert!(t1.contains("@r1"));
     assert!(t2.contains("/2"));
+}
+
+#[test]
+fn spike_supports_single_positional_input() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("spiked.fa");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "spike",
+            "tests/data/a.fa",
+            "-a",
+            "tests/data/a.fa",
+            "-o",
+            out.to_str().unwrap(),
+            "-s",
+            "5",
+        ])
+        .assert()
+        .success();
+    let t = fs::read_to_string(out).unwrap();
+    assert!(t.contains(">r1"));
+}
+
+#[test]
+fn spike_rejects_mixed_single_and_paired_inputs() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "spike",
+            "tests/data/a.fq",
+            "-i",
+            "tests/data/a.fq",
+            "-I",
+            "tests/data/b.fq",
+            "-a",
+            "tests/data/a.fq",
+            "-A",
+            "tests/data/b.fq",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("do not mix positional single-end INPUT"));
 }
 
 #[test]
