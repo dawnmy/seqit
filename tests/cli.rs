@@ -312,6 +312,33 @@ fn stats_supports_multiple_inputs() {
 }
 
 #[test]
+fn stats_reports_sequence_type_dna_rna_protein() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin(">d1\nACGTNN\n")
+        .assert()
+        .success()
+        .stdout(contains("\tDNA\t"));
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin(">r1\nACGUNN\n")
+        .assert()
+        .success()
+        .stdout(contains("\tRNA\t"));
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin(">p1\nMKWVTFISLLLLFSSAYS\n")
+        .assert()
+        .success()
+        .stdout(contains("\tprotein\t"));
+}
+
+#[test]
 fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
     Command::cargo_bin("seqit")
         .unwrap()

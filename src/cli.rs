@@ -81,7 +81,10 @@ impl Commands {
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct CommonIoArgs {
-    #[arg(value_name = "INPUT", help = "Input file (default: stdin)")]
+    #[arg(
+        value_name = "INPUT",
+        help = "Positional single-end/single-file input (default: stdin). Pair-aware commands enter paired mode only when both mate flags are provided."
+    )]
     pub input: Option<String>,
     #[arg(
         short = 'o',
@@ -115,6 +118,9 @@ pub struct CommonIoArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit stats reads.fq.gz\n  seqit stats r1.fq.gz r2.fq.gz --per-file\n  seqit stats assembly.fa -a --json"
+)]
 pub struct StatsArgs {
     #[arg(value_name = "INPUTS", help = "One or more input files")]
     pub inputs: Vec<String>,
@@ -158,6 +164,9 @@ pub struct StatsArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit seq reads.fa --min-len 100 --max-len 500 -o filtered.fa\n  seqit seq reads.fq --min-qual 20 --revcomp -o cleaned.fq\n  seqit seq reads.fa --name --full-name"
+)]
 pub struct SeqArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -262,6 +271,9 @@ pub struct SeqArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit fq2fa reads.fq -o reads.fa\n  seqit fq2fa reads.fq.gz -o reads.fa.gz --compression gz"
+)]
 pub struct Fq2faArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -276,6 +288,9 @@ pub enum SearchBy {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit grep reads.fq -p ACTG --by seq -o matched.fq\n  seqit grep reads.fq --pattern-file ids.txt --by id --invert\n  seqit grep --in1 r1.fq --in2 r2.fq -p adapter --pair-mode both -o out.r1.fq -O out.r2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both --in1 and --in2 together."
+)]
 pub struct GrepArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -340,6 +355,9 @@ pub struct GrepArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit locate reads.fa -p ACGT\n  seqit locate reads.fa -p 'A[CT]G' --regex --all --bed\n  seqit locate reads.fa --pattern-file motifs.txt --ignore-case"
+)]
 pub struct LocateArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -362,6 +380,9 @@ pub struct LocateArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit sample reads.fq -n 100000 -s 42 -o sub.fq\n  seqit sample reads.fq -r 0.1 -s 42 -o sub.fq\n  seqit sample -i r1.fq -I r2.fq -n 50000 -o sub.r1.fq -O sub.r2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
+)]
 pub struct SampleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -417,6 +438,9 @@ pub enum DupBy {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit rmdup reads.fa --by seq --keep-first -o dedup.fa\n  seqit rmdup reads.fa --by full --keep-last -o dedup.fa\n  seqit rmdup -i r1.fq -I r2.fq --mark-dup -o d1.fq -O d2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
+)]
 pub struct RmdupArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -470,7 +494,7 @@ pub struct RmdupArgs {
 
 #[derive(Debug, clap::Args)]
 #[command(
-    after_help = "Examples:\n  seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa\n      # Generate IDs: sample_000001, sample_000002, ...\n\n  seqit rename reads.fa -e 'lib_PREFIX_N' -p r -w 4 -o renamed.fa\n      # Template supports prefix and index placeholders (see README for exact syntax)\n\n  seqit rename reads.fa --map-file id_map.tsv -o renamed.fa\n      # Exact ID mapping from a 2-column TSV: <old_id>\\t<new_id>\n\n  seqit rename reads.fa --match-regex '^sample_(\\\\d+)$' --replace 'S$1' -o renamed.fa\n      # Regex-based ID rewrite with capture groups\n\n  seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq\n      # Paired-end renaming while preserving /1 and /2 suffixes"
+    after_help = "Examples:\n  seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa\n      # Generate IDs: sample_000001, sample_000002, ...\n\n  seqit rename reads.fa -e 'lib_PREFIX_N' -p r -w 4 -o renamed.fa\n      # Template supports prefix and index placeholders (see README for exact syntax)\n\n  seqit rename reads.fa --map-file id_map.tsv -o renamed.fa\n      # Exact ID mapping from a 2-column TSV: <old_id>\\t<new_id>\n\n  seqit rename reads.fa --match-regex '^sample_(\\\\d+)$' --replace 'S$1' -o renamed.fa\n      # Regex-based ID rewrite with capture groups\n\n  seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq\n      # Paired-end renaming while preserving /1 and /2 suffixes\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
 )]
 pub struct RenameArgs {
     #[command(flatten)]
@@ -582,6 +606,9 @@ pub enum SortBy {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit sort reads.fa --by id -o sorted.fa\n  seqit sort reads.fa --by len --numeric --reverse -o sorted.fa\n  seqit sort reads.fa --by seq --mem 512M --tmp-dir /tmp"
+)]
 pub struct SortArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -613,6 +640,9 @@ pub struct SortArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit shuffle reads.fa -s 42 -o shuffled.fa\n  seqit shuffle reads.fq --mem 1G --tmp-dir /tmp -o shuffled.fq\n  seqit shuffle -i r1.fq -I r2.fq -s 42 -o shuf.r1.fq -O shuf.r2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
+)]
 pub struct ShuffleArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -664,6 +694,9 @@ pub struct ShuffleArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit spike target.fa -a inserts.fa -s 123 -o spiked.fa\n  seqit spike target.fq -a add.fq -o spiked.fq\n  seqit spike -i t.r1.fq -I t.r2.fq -a a.r1.fq -A a.r2.fq -o out.r1.fq -O out.r2.fq\n\nMode notes:\n  - Single-end: positional INPUT (or stdin), with --add.\n  - Paired-end: provide both input mates and both add mates."
+)]
 pub struct SpikeArgs {
     #[arg(
         value_name = "INPUT",
@@ -747,6 +780,9 @@ pub struct SpikeArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit head reads.fa -n 100 -o first100.fa\n  seqit head reads.fq -p 0.1 -o first10pct.fq\n  seqit head -i r1.fq -I r2.fq -n 50000 -o h1.fq -O h2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
+)]
 pub struct HeadArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,
@@ -787,6 +823,9 @@ pub struct HeadArgs {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Examples:\n  seqit tail reads.fa -n 100 -o last100.fa\n  seqit tail reads.fq -p 0.1 -o last10pct.fq\n  seqit tail -i r1.fq -I r2.fq -n 50000 -o t1.fq -O t2.fq\n\nMode notes:\n  - Single-end: provide positional INPUT (or stdin).\n  - Paired-end: provide both mate flags together."
+)]
 pub struct TailArgs {
     #[command(flatten)]
     pub io: CommonIoArgs,

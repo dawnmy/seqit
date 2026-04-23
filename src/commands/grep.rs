@@ -1,18 +1,18 @@
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, BufWriter, Write},
 };
 
 use anyhow::{bail, Context, Result};
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rayon::prelude::*;
+use bio::io::{fasta, fastq};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use regex::{Regex, RegexBuilder};
 
 use crate::{
     cli::{GrepArgs, SearchBy},
-    formats::{SeqFormat, SeqRecord},
-    io, pairs, utils,
+    formats::SeqFormat,
+    io, utils,
 };
 
 pub fn run(args: GrepArgs) -> Result<()> {
@@ -44,96 +44,187 @@ pub fn run(args: GrepArgs) -> Result<()> {
     )?;
 
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {
-        let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
-        let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
-        let (r1, r2) = pairs::prepare_paired_records(r1, r2, args.allow_unpaired)?;
-        let mut o1 = Vec::new();
-        let mut o2 = Vec::new();
+        let out2 = args
+            .output2
+            .as_deref()
+            .context("paired grep requires --output2")?;
+        let r1 = io::open_reader(Some(in1))?;
+        let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
+        let r2 = io::open_reader(Some(in2))?;
+        let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
+        let fq1 = fastq::Reader::new(BufReader::new(r1));
+        let fq2 = fastq::Reader::new(BufReader::new(r2));
+        let mut it1 = fq1.records();
+        let mut it2 = fq2.records();
+
+        let mut w1 = None;
+        let mut w2 = None;
+        if !args.count && !args.only_names {
+            let o1 = io::open_writer(&args.io.output)?;
+            let o1 = io::wrap_compress(o1, &args.io.output, &args.io.compression)?;
+            let o2 = io::open_writer(out2)?;
+            let o2 = io::wrap_compress(o2, out2, &args.io.compression)?;
+            w1 = Some(fastq::Writer::new(BufWriter::new(o1)));
+            w2 = Some(fastq::Writer::new(BufWriter::new(o2)));
+        }
         let mut count = 0usize;
-        let total = r1.len().min(r2.len());
-        let progress = make_progress_bar(args.progress, total as u64);
-        for (a, b) in r1.into_iter().zip(r2.into_iter()) {
-            let m1 = is_match(&a, &matcher, &args.by);
-            let m2 = is_match(&b, &matcher, &args.by);
-            let mut keep = if args.pair_mode == "both" {
-                m1 && m2
-            } else {
-                m1 || m2
-            };
-            if args.invert {
-                keep = !keep;
-            }
-            if keep {
-                count += 1;
-                if !args.count {
-                    o1.push(a);
-                    o2.push(b);
+        let mut invalid_preview = Vec::new();
+        let mut invalid_count = 0usize;
+        let progress = make_progress_bar(args.progress);
+        loop {
+            let a = it1.next().transpose()?;
+            let b = it2.next().transpose()?;
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    if pair_key(a.id()) != pair_key(b.id()) {
+                        invalid_count += 1;
+                        if invalid_preview.len() < 10 {
+                            invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        }
+                        continue;
+                    }
+                    let mut keep = if args.pair_mode == "both" {
+                        is_match_fields(
+                            a.id(),
+                            a.desc(),
+                            a.seq(),
+                            Some(a.qual()),
+                            &matcher,
+                            &args.by,
+                        ) && is_match_fields(
+                            b.id(),
+                            b.desc(),
+                            b.seq(),
+                            Some(b.qual()),
+                            &matcher,
+                            &args.by,
+                        )
+                    } else {
+                        is_match_fields(
+                            a.id(),
+                            a.desc(),
+                            a.seq(),
+                            Some(a.qual()),
+                            &matcher,
+                            &args.by,
+                        ) || is_match_fields(
+                            b.id(),
+                            b.desc(),
+                            b.seq(),
+                            Some(b.qual()),
+                            &matcher,
+                            &args.by,
+                        )
+                    };
+                    if args.invert {
+                        keep = !keep;
+                    }
+                    if keep {
+                        count += 1;
+                        if args.only_names {
+                            println!("{}", a.id());
+                        } else if let (Some(w1), Some(w2)) = (&mut w1, &mut w2) {
+                            w1.write(a.id(), a.desc(), a.seq(), a.qual())?;
+                            w2.write(b.id(), b.desc(), b.seq(), b.qual())?;
+                        }
+                    }
                 }
+                (Some(a), None) => {
+                    invalid_count += 1;
+                    if invalid_preview.len() < 10 {
+                        invalid_preview.push(format!("unmatched in R1: {}", a.id()));
+                    }
+                }
+                (None, Some(b)) => {
+                    invalid_count += 1;
+                    if invalid_preview.len() < 10 {
+                        invalid_preview.push(format!("unmatched in R2: {}", b.id()));
+                    }
+                }
+                (None, None) => break,
             }
             if let Some(pb) = &progress {
                 pb.inc(1);
             }
         }
+        report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
         if let Some(pb) = &progress {
             pb.finish_and_clear();
         }
         if args.count {
             println!("{count}");
-            return Ok(());
         }
-        let out2 = args
-            .output2
-            .as_deref()
-            .context("paired grep requires --output2")?;
-        if args.only_names {
-            for r in &o1 {
-                println!("{}", r.id);
-            }
-            return Ok(());
-        }
-        io::write_records(&args.io.output, SeqFormat::Fastq, &args.io.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &o2)?;
         return Ok(());
     }
 
     let in_path = args.io.input.as_deref();
-    let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
-    let selected: Vec<&SeqRecord> = if args.progress {
-        let pb = make_progress_bar(true, recs.len() as u64).expect("progress bar is enabled");
-        let selected = recs
-            .par_iter()
-            .progress_with(pb.clone())
-            .filter(|r| {
-                let mut keep = is_match(r, &matcher, &args.by);
+    let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
+    let progress = make_progress_bar(args.progress);
+    let mut count = 0usize;
+    let mut writer = None;
+    if !args.count && !args.only_names {
+        let out = io::open_writer(&args.io.output)?;
+        let out = io::wrap_compress(out, &args.io.output, &args.io.compression)?;
+        writer = Some(BufWriter::new(out));
+    }
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for rec in fa.records() {
+                let rec = rec?;
+                let mut keep =
+                    is_match_fields(rec.id(), rec.desc(), rec.seq(), None, &matcher, &args.by);
                 if args.invert {
                     keep = !keep;
                 }
-                keep
-            })
-            .collect();
-        pb.finish_and_clear();
-        selected
-    } else {
-        recs.par_iter()
-            .filter(|r| {
-                let mut keep = is_match(r, &matcher, &args.by);
-                if args.invert {
-                    keep = !keep;
+                if keep {
+                    count += 1;
+                    if args.only_names {
+                        println!("{}", rec.id());
+                    } else if let Some(w) = &mut writer {
+                        write_fasta_record(w, rec.id(), rec.desc(), rec.seq())?;
+                    }
                 }
-                keep
-            })
-            .collect()
-    };
-
-    if args.count {
-        println!("{}", selected.len());
-    } else if args.only_names {
-        for r in selected {
-            println!("{}", r.id);
+                if let Some(pb) = &progress {
+                    pb.inc(1);
+                }
+            }
         }
-    } else {
-        let out: Vec<SeqRecord> = selected.into_iter().cloned().collect();
-        io::write_records(&args.io.output, fmt, &args.io.compression, &out)?;
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for rec in fq.records() {
+                let rec = rec?;
+                let mut keep = is_match_fields(
+                    rec.id(),
+                    rec.desc(),
+                    rec.seq(),
+                    Some(rec.qual()),
+                    &matcher,
+                    &args.by,
+                );
+                if args.invert {
+                    keep = !keep;
+                }
+                if keep {
+                    count += 1;
+                    if args.only_names {
+                        println!("{}", rec.id());
+                    } else if let Some(w) = &mut writer {
+                        write_fastq_record(w, rec.id(), rec.desc(), rec.seq(), rec.qual())?;
+                    }
+                }
+                if let Some(pb) = &progress {
+                    pb.inc(1);
+                }
+            }
+        }
+        _ => bail!("grep currently supports FASTA/FASTQ input"),
+    }
+    if let Some(pb) = &progress {
+        pb.finish_and_clear();
+    }
+    if args.count {
+        println!("{count}");
     }
     Ok(())
 }
@@ -216,34 +307,98 @@ impl Matcher {
     }
 }
 
-fn make_progress_bar(enabled: bool, total: u64) -> Option<ProgressBar> {
-    if !enabled || total == 0 {
+fn make_progress_bar(enabled: bool) -> Option<ProgressBar> {
+    if !enabled {
         return None;
     }
-    let pb = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
+    let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
     pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-            .expect("valid progress template")
-            .progress_chars("=> "),
+        ProgressStyle::with_template("{spinner:.green} processed {pos} records")
+            .expect("valid progress template"),
     );
     Some(pb)
 }
 
-fn is_match(rec: &SeqRecord, matcher: &Matcher, by: &SearchBy) -> bool {
+fn is_match_fields(
+    id: &str,
+    desc: Option<&str>,
+    seq: &[u8],
+    qual: Option<&[u8]>,
+    matcher: &Matcher,
+    by: &SearchBy,
+) -> bool {
     match by {
-        SearchBy::Id => matcher.is_match(&rec.id),
-        SearchBy::Name => matcher.is_match(&rec.name()),
+        SearchBy::Id => matcher.is_match(id),
+        SearchBy::Name => {
+            if let Some(desc) = desc {
+                matcher.is_match(&format!("{id} {desc}"))
+            } else {
+                matcher.is_match(id)
+            }
+        }
         SearchBy::Seq => {
-            let seq = String::from_utf8_lossy(&rec.seq);
+            let seq = String::from_utf8_lossy(seq);
             matcher.is_match(&seq)
         }
-        SearchBy::Qual => rec
-            .qual
-            .as_ref()
+        SearchBy::Qual => qual
             .map(|q| {
                 let qual = String::from_utf8_lossy(q);
                 matcher.is_match(&qual)
             })
             .unwrap_or(false),
     }
+}
+
+fn write_fasta_record(w: &mut impl Write, id: &str, desc: Option<&str>, seq: &[u8]) -> Result<()> {
+    if let Some(desc) = desc {
+        writeln!(w, ">{id} {desc}")?;
+    } else {
+        writeln!(w, ">{id}")?;
+    }
+    writeln!(w, "{}", String::from_utf8_lossy(seq))?;
+    Ok(())
+}
+
+fn write_fastq_record(
+    w: &mut impl Write,
+    id: &str,
+    desc: Option<&str>,
+    seq: &[u8],
+    qual: &[u8],
+) -> Result<()> {
+    if let Some(desc) = desc {
+        writeln!(w, "@{id} {desc}")?;
+    } else {
+        writeln!(w, "@{id}")?;
+    }
+    writeln!(w, "{}", String::from_utf8_lossy(seq))?;
+    writeln!(w, "+")?;
+    writeln!(w, "{}", String::from_utf8_lossy(qual))?;
+    Ok(())
+}
+
+fn pair_key(id: &str) -> &str {
+    id.strip_suffix("/1")
+        .or_else(|| id.strip_suffix("/2"))
+        .unwrap_or(id)
+}
+
+fn report_invalid_pairs(
+    invalid_count: usize,
+    invalid_preview: Vec<String>,
+    allow_unpaired: bool,
+) -> Result<()> {
+    if invalid_count == 0 {
+        return Ok(());
+    }
+    let preview = invalid_preview.join("; ");
+    if !allow_unpaired {
+        bail!(
+            "paired inputs contain {invalid_count} invalid/unpaired records; examples: {preview}. rerun with --allow-unpaired to continue"
+        );
+    }
+    eprintln!(
+        "warning: paired inputs contain {invalid_count} invalid/unpaired records; examples: {preview}. unpaired records will be skipped"
+    );
+    Ok(())
 }

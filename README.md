@@ -1,28 +1,6 @@
 # seqit
 
-`seqit` is a streaming-first Rust CLI toolkit for practical sequence-file manipulation in production bioinformatics pipelines.
-
-## Current scope
-
-This foundation release focuses on robust FASTA/FASTQ handling with paired-end correctness for pair-aware commands.
-
-Implemented commands:
-
-- `stats` – per-file and aggregate summary metrics.
-- `seq` – general sequence filtering/transformation (length, quality, casing, reverse/comp, etc.).
-- `fq2fa` – FASTQ to FASTA conversion.
-- `grep` – pattern filtering on id/name/seq/qual, including pair-aware selection.
-- `locate` – motif coordinate reporting.
-- `sample` – random fixed-count or rate sampling.
-- `rmdup` – duplicate removal/marking.
-- `rename` – ID renaming (sequential, mapping-file, regex replacement).
-- `sort` – sorting by ID/name/length/sequence.
-- `shuffle` – deterministic random shuffling.
-- `spike` – spike-in records from another dataset.
-- `head` – keep first N or first proportion.
-- `tail` – keep last N or last proportion.
-
-SAM parsing for `stats` (basic count) is available, while BAM/CRAM support is scaffolded for upcoming work.
+`seqit` is a streaming-first Rust CLI toolkit for practical FASTA/FASTQ sequence-file operations in production pipelines.
 
 ## Installation
 
@@ -31,176 +9,276 @@ cargo build --release
 ./target/release/seqit --help
 ```
 
-## Supported formats and compression
+## Quick start
 
-Input/output formats:
+```bash
+# Basic stats
+seqit stats reads.fq.gz
+
+# Filter by length and reverse-complement
+seqit seq reads.fa --min-len 100 --revcomp -o filtered.fa
+
+# Convert FASTQ to FASTA
+seqit fq2fa reads.fq.gz -o reads.fa.gz --compression gz
+```
+
+## Input semantics (single-end vs paired-end)
+
+For pair-aware commands (`grep`, `sample`, `rmdup`, `rename`, `shuffle`, `spike`, `head`, `tail`):
+
+- **Single-end mode**: provide one positional `INPUT` (or stream from stdin when omitted).
+- **Paired-end mode**: provide **both mates together** (`-i/-1/--in1` style + `-I/-2/--in2` style, depending on command).
+- Mixed/partial mate flags are invalid.
+- Use `-o/--output` and `-O/--output2` for paired outputs.
+- `--allow-unpaired` keeps processing and skips invalid/unpaired records.
+
+---
+
+## Common options
+
+Many commands share these options:
+
+- `INPUT` (positional): single-end/single-file input.
+- `-o, --output <FILE>`: primary output (`-` means stdout).
+- `-O, --output2 <FILE>`: mate-2 output in paired mode.
+- `--format <auto|fasta|fastq|sam|bam|cram>`: IO format override.
+- `--compression <auto|none|gz|xz>`: output compression.
+- `-t, --threads <N>`: worker thread count.
+- `--quiet`: suppress non-error logs.
+
+## Formats and compression
+
+Supported formats:
 
 - FASTA
 - FASTQ
-- SAM (stats only, text)
-- BAM/CRAM (detected, but not yet implemented in commands)
+- SAM (`stats` supports basic counting)
+- BAM/CRAM are scaffolded/detected for future support
 
-Compression:
+Compression codecs:
 
 - none
 - gzip (`.gz`)
 - xz (`.xz`)
 
-## CLI design conventions
+---
 
-Common options are unified across commands where relevant:
+## Command reference
 
-- `-t, --threads` (set worker thread count; applies to all commands including `stats` and `spike`)
-- `-o, --output`
-- `-O, --output2`
-- positional `INPUT` (single-end/single-file input)
-- `-i/-1` and `-I/-2` (paired read 1/read 2 for pair-aware commands)
-- `-s, --seed`
-- `--format`
-- `--compression`
+## `seqit stats`
+Compute summary statistics for one or more files.
 
-## Examples
+### Key options
+- `INPUTS...`: one or more input files.
+- `-T, --tsv` / `--tabular`: TSV output.
+- `-j, --json`: JSON output.
+- `-a, --all`: extended metrics.
+- `-p, --per-file`: suppress TOTAL row.
+- `--format`, `--threads`.
 
-### stats
-
+### Examples
 ```bash
 seqit stats reads.fq.gz
-seqit stats reads_1.fq.gz reads_2.fq.gz                # pretty table with TOTAL row
-seqit stats reads_1.fq.gz reads_2.fq.gz --per-file     # pretty table without TOTAL row
-seqit stats reads.fq.gz -T                              # TSV output
-seqit stats assembly.fa -a                              # extended metrics (Q1/median/Q3, N%, N50/L50)
-seqit stats reads.fq.gz -a                              # read metrics + Q10/Q20/Q30 (no N50/L50 columns)
-seqit stats assembly.fa reads.fq.gz -a                  # mixed types: shows both column groups with NA where not applicable
+seqit stats r1.fq.gz r2.fq.gz --per-file
+seqit stats assembly.fa -a
 seqit stats sample.fa --json
-seqit stats sample.fa -t 8
 ```
 
-`stats` output modes:
+## `seqit seq`
+Filter/transform sequences and reads.
 
-- default: human-readable pretty table with ASCII borders
-- `-T, --tsv` (alias: `--tabular`): tab-separated output for scripting
-- `--json`: structured JSON output
-- `-a, --all`: emit extended assembly/read metrics
+### Key options
+- Length filters: `--min-len`, `--max-len`.
+- Orientation: `--rev`, `--comp`, `--revcomp`.
+- Case/gaps: `--upper`, `--lower`, `--remove-gaps`, `--gap-letters`.
+- Quality filters: `--min-qual`, `--max-qual`, `--qual-ascii-base`.
+- Projection/validation: `--name`, `--full-name`, `--only-id`, `--seq`, `--validate-seq`.
+- Display: `--color`.
 
-### seq
-
+### Examples
 ```bash
-seqit seq reads.fa --min-len 75 --revcomp -o filtered.fa
+seqit seq reads.fa --min-len 100 --max-len 2000 -o filtered.fa
+seqit seq reads.fq --min-qual 20 --revcomp -o cleaned.fq
+seqit seq reads.fa --name --full-name
 ```
 
-Notes:
-- `--min-qual/-q` and `--max-qual/-Q` are disabled by default with `-1` (not `-2`).
-- Use `--name`, `--only-id`, or `--seq` for text-only projections.
+## `seqit fq2fa`
+Convert FASTQ to FASTA.
 
-### fq2fa
-
+### Examples
 ```bash
+seqit fq2fa reads.fq -o reads.fa
 seqit fq2fa reads.fq.gz -o reads.fa.gz --compression gz
 ```
 
-### grep
+## `seqit grep`
+Search/filter by ID, name, sequence, or quality.
 
+### Key options
+- Patterns: `-p/--pattern`, `-f/--pattern-file`.
+- Search field: `-b/--by <id|name|seq|qual>`.
+- Matching mode: `--regex`, `--ignore-case`, `--invert`.
+- Output behavior: `--count`, `--only-names`.
+- Paired mode: `--in1`, `--in2`, `--pair-mode <any|both>`, `--output2`, `--allow-unpaired`.
+
+### Examples
 ```bash
 seqit grep reads.fq -p ACTG --by seq -o matched.fq
-seqit grep --in1 r1.fq --in2 r2.fq -p adapter --pair-mode any -o out.r1.fq -O out.r2.fq
+seqit grep reads.fq --pattern-file ids.txt --by id --invert
+seqit grep --in1 r1.fq --in2 r2.fq -p adapter --pair-mode both -o out.r1.fq -O out.r2.fq
 ```
 
-### locate
+## `seqit locate`
+Locate motifs and report coordinates.
 
+### Key options
+- `-p/--pattern`, `-f/--pattern-file`
+- `--regex`, `--ignore-case`
+- `-a/--all`: report all matches per record.
+- `-B/--bed`: BED-like output.
+
+### Examples
 ```bash
-seqit locate reads.fa -p ACGT --all
-seqit locate reads.fa -p 'A[CT]G' --regex --bed
+seqit locate reads.fa -p ACGT
+seqit locate reads.fa -p 'A[CT]G' --regex --all --bed
+seqit locate reads.fa --pattern-file motifs.txt --ignore-case
 ```
 
-### sample
+## `seqit sample`
+Random sampling by fixed count or rate.
 
+### Key options
+- Single-end positional `INPUT`.
+- Paired flags: `-i/--input|--in1`, `-I/--input2|--in2`.
+- `-n/--num`, `-r/--rate`.
+- `-s/--seed`.
+- `--progress`, `--allow-unpaired`.
+
+### Examples
 ```bash
 seqit sample reads.fq -n 100000 -s 42 -o sub.fq
-seqit sample -i r1.fq -I r2.fq -r 0.1 -s 42 -o s1.fq -O s2.fq
+seqit sample reads.fq -r 0.1 -s 42 -o sub.fq
+seqit sample -i r1.fq -I r2.fq -n 50000 -o sub.r1.fq -O sub.r2.fq
 ```
 
-### rmdup
+## `seqit rmdup`
+Remove/mark duplicates (single or paired).
 
+### Key options
+- Duplicate key: `-b/--by <id|seq|full>`.
+- Retention: `--keep-first` or `--keep-last`.
+- Annotation: `--count-dup`, `--mark-dup`.
+- Paired options: `-i/-I`, `--in1/--in2`, `-O`, `--allow-unpaired`.
+
+### Examples
 ```bash
 seqit rmdup reads.fa --by seq --keep-first -o dedup.fa
-seqit rmdup -i r1.fq -I r2.fq --by full --mark-dup -o d1.fq -O d2.fq
+seqit rmdup reads.fa --by full --keep-last -o dedup.fa
+seqit rmdup -i r1.fq -I r2.fq --mark-dup -o d1.fq -O d2.fq
 ```
 
-### rename
+## `seqit rename`
+Rename IDs with generation, mapping, or regex replacement.
 
+### Key options
+- Generate mode: `--prefix`, `--start`, `--width`, `--template`.
+- Map mode: `--map-file <TSV>` (`old_id<TAB>new_id`, no header).
+- Regex mode: `--match-regex`, `--replace`.
+- Mode control: `--mode <auto|generate|map|regex>`.
+- Paired behavior: `--keep-pair-suffix`, paired mate flags, `--allow-unpaired`.
+
+### Template placeholders
+- `{prefix}` → value of `--prefix`
+- `{n}` → zero-padded index from `--start`/`--width`
+
+### Examples
 ```bash
 seqit rename reads.fa --prefix sample_ --start 1 --width 8 -o renamed.fa
-seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq
-seqit rename reads.fa -e 'lib_{n}_{prefix}' -p r -w 4 -o renamed.fa
+seqit rename reads.fa --template 'lib_{prefix}_{n}' --prefix r --width 4 -o renamed.fa
 seqit rename reads.fa --map-file id_map.tsv -o renamed.by_map.fa
 seqit rename reads.fa --match-regex '^sample_(\d+)$' --replace 'S$1' -o renamed.by_regex.fa
+seqit rename -i r1.fq -I r2.fq --prefix pair_ --keep-pair-suffix -o r1.new.fq -O r2.new.fq
 ```
 
-`rename` modes:
+## `seqit sort`
+Sort records by key.
 
-- **Generate mode** (default): build IDs from `--prefix`, `--start`, `--width`, optional `--template`.
-  - Template placeholders:
-    - `{prefix}`: value from `--prefix`
-    - `{n}`: zero-padded index based on `--start`/`--width`
-- **Map mode**: `--map-file <TSV>`
-  - File format: **exactly two tab-separated columns, no header**.
-  - Column 1: existing ID, column 2: replacement ID.
-  - Unmatched IDs are kept unchanged.
-- **Regex mode**: `--match-regex <PATTERN> --replace <REPLACEMENT>`
-  - Uses Rust regex syntax.
-  - Replacement supports capture groups like `$1`, `$2`, etc.
+### Key options
+- `-b/--by <id|name|len|seq>`.
+- `-n/--numeric`.
+- `-r/--reverse`.
+- `-m/--mem` (spill threshold), `-T/--tmp-dir`.
 
-Mode selection:
-- `--mode auto` (default): picks map mode when `--map-file` is set, regex mode when `--match-regex/--replace` are set, otherwise generate mode.
-- You can force with `--mode generate|map|regex`.
-
-### sort
-
+### Examples
 ```bash
-seqit sort reads.fa --by len --reverse -o sorted.fa
+seqit sort reads.fa --by id -o sorted.fa
+seqit sort reads.fa --by len --numeric --reverse -o sorted.fa
+seqit sort reads.fa --by seq --mem 512M --tmp-dir /tmp -o sorted.fa
 ```
 
-### shuffle
+## `seqit shuffle`
+Deterministic random shuffling.
 
+### Key options
+- `-s/--seed`.
+- `-m/--mem`, `-T/--tmp-dir` for spill behavior.
+- Paired mate flags and `--allow-unpaired`.
+
+### Examples
 ```bash
 seqit shuffle reads.fa -s 42 -o shuffled.fa
+seqit shuffle reads.fq --mem 1G --tmp-dir /tmp -o shuffled.fq
 seqit shuffle -i r1.fq -I r2.fq -s 42 -o shuf.r1.fq -O shuf.r2.fq
 ```
 
-### spike
+## `seqit spike`
+Spike records from an additional dataset into a main dataset.
 
+### Key options
+- Main input: positional `INPUT` (single-end) or `-i/-I` mates (paired).
+- Spike input: `-a/--add` (required), plus `-A/--add2` for paired.
+- `-s/--seed`, `-o/-O`, `--format`, `--compression`, `--threads`, `--allow-unpaired`.
+
+### Examples
 ```bash
 seqit spike target.fa -a inserts.fa -s 123 -o spiked.fa
+seqit spike target.fq -a add.fq -o spiked.fq
 seqit spike -i target.r1.fq -I target.r2.fq -a add.r1.fq -A add.r2.fq -s 123 -o out.r1.fq -O out.r2.fq
 ```
 
-### head / tail
+## `seqit head`
+Keep first N records/pairs or first proportion.
 
+### Key options
+- `-n/--num`, `-p/--proportion`
+- Single-end positional `INPUT` or paired `-i/-I`
+- `-O`, `--allow-unpaired`
+
+### Examples
 ```bash
 seqit head reads.fa -n 100 -o first100.fa
-seqit tail reads.fq -p 0.1 -o last10pct.fq
+seqit head reads.fq -p 0.1 -o first10pct.fq
 seqit head -i r1.fq -I r2.fq -n 50000 -o h1.fq -O h2.fq
 ```
 
-## Paired-end behavior
+## `seqit tail`
+Keep last N records/pairs or last proportion.
 
-Pair-aware commands (`grep`, `sample`, `rmdup`, `rename`, `shuffle`, `spike`, `head`, `tail`) validate mate IDs and preserve pair lockstep.
+### Key options
+- `-n/--num`, `-p/--proportion`
+- Single-end positional `INPUT` or paired `-i/-I`
+- `-O`, `--allow-unpaired`
 
-- Single-end mode: pass one positional `INPUT` (or stdin if omitted).
-- Paired-end mode: pass both `-i/-1` and `-I/-2` together. Mixed single + paired input flags are rejected.
-- By default, invalid pairs fail fast with example read IDs and a total invalid count.
-- Use `--allow-unpaired` to continue and skip invalid/unpaired records.
-- Pair operations are done at pair granularity (not independent mates).
+### Examples
+```bash
+seqit tail reads.fa -n 100 -o last100.fa
+seqit tail reads.fq -p 0.1 -o last10pct.fq
+seqit tail -i r1.fq -I r2.fq -n 50000 -o t1.fq -O t2.fq
+```
 
-## Design notes
+---
 
-- Streaming-oriented I/O abstraction with format and compression auto-detection.
-- Clean command module separation (`src/commands/*`) to simplify extension.
-- Deterministic RNG for reproducible sampling/shuffling/spike-in.
-
-## Tests
-
-Run:
+## Testing
 
 ```bash
 cargo test
