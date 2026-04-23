@@ -125,63 +125,16 @@ pub fn run(args: StatsArgs) -> Result<()> {
 }
 
 fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
+    if p == "-" && matches!(args.format, crate::cli::FormatArg::Auto) {
+        let (fmt, recs) =
+            io::read_records_with_format(Some(p), &args.format, &crate::cli::CompressionArg::Auto)?;
+        return build_seq_row_from_records(p, fmt, recs);
+    }
     let fmt = SeqFormat::from_arg_or_detect(&args.format, Some(p))?;
     match fmt {
         SeqFormat::Fasta | SeqFormat::Fastq => {
             let recs = io::read_records(Some(p), fmt, &crate::cli::CompressionArg::Auto)?;
-            let lens: Vec<usize> = recs.par_iter().map(|r| r.seq.len()).collect();
-            let acc = recs
-                .par_iter()
-                .map(|r| {
-                    let len = r.seq.len();
-                    let gc = bytecount::count(&r.seq, b'G')
-                        + bytecount::count(&r.seq, b'g')
-                        + bytecount::count(&r.seq, b'C')
-                        + bytecount::count(&r.seq, b'c');
-                    SeqAcc::with_record(len, gc)
-                })
-                .reduce(SeqAcc::new, SeqAcc::merge);
-            let records = acc.records;
-            let total_bases = acc.total_bases;
-            let min_len = if records > 0 { acc.min_len } else { 0 };
-            let max_len = acc.max_len;
-            let mean_len = if records > 0 {
-                total_bases as f64 / records as f64
-            } else {
-                0.0
-            };
-            let gc_pct = if total_bases > 0 {
-                (acc.gc as f64) * 100.0 / (total_bases as f64)
-            } else {
-                0.0
-            };
-            let (n50, l50) = calc_nx_lx(&lens, 50.0);
-            let (q1_len, median_len, q3_len) = calc_quartiles(&lens);
-            let n_pct = calc_n_pct(&recs);
-            let (q10_pct, q20_pct, q30_pct) = if fmt == SeqFormat::Fastq {
-                calc_fastq_quality_pcts(&recs)
-            } else {
-                (None, None, None)
-            };
-            Ok(StatRow {
-                file: p.to_string(),
-                format: format!("{:?}", fmt).to_lowercase(),
-                records,
-                total_bases,
-                min_len,
-                max_len,
-                mean_len,
-                gc_pct,
-                n50,
-                l50,
-                q1_len,
-                median_len,
-                q3_len,
-                n_pct,
-                q10_pct,
-                q20_pct,
-                q30_pct,
-            })
+            build_seq_row_from_records(p, fmt, recs)
         }
         SeqFormat::Sam => {
             let content = std::fs::read_to_string(p)?;
@@ -208,6 +161,66 @@ fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
         }
         SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt),
     }
+}
+
+fn build_seq_row_from_records(
+    file: &str,
+    fmt: SeqFormat,
+    recs: Vec<crate::formats::SeqRecord>,
+) -> Result<StatRow> {
+    let lens: Vec<usize> = recs.par_iter().map(|r| r.seq.len()).collect();
+    let acc = recs
+        .par_iter()
+        .map(|r| {
+            let len = r.seq.len();
+            let gc = bytecount::count(&r.seq, b'G')
+                + bytecount::count(&r.seq, b'g')
+                + bytecount::count(&r.seq, b'C')
+                + bytecount::count(&r.seq, b'c');
+            SeqAcc::with_record(len, gc)
+        })
+        .reduce(SeqAcc::new, SeqAcc::merge);
+    let records = acc.records;
+    let total_bases = acc.total_bases;
+    let min_len = if records > 0 { acc.min_len } else { 0 };
+    let max_len = acc.max_len;
+    let mean_len = if records > 0 {
+        total_bases as f64 / records as f64
+    } else {
+        0.0
+    };
+    let gc_pct = if total_bases > 0 {
+        (acc.gc as f64) * 100.0 / (total_bases as f64)
+    } else {
+        0.0
+    };
+    let (n50, l50) = calc_nx_lx(&lens, 50.0);
+    let (q1_len, median_len, q3_len) = calc_quartiles(&lens);
+    let n_pct = calc_n_pct(&recs);
+    let (q10_pct, q20_pct, q30_pct) = if fmt == SeqFormat::Fastq {
+        calc_fastq_quality_pcts(&recs)
+    } else {
+        (None, None, None)
+    };
+    Ok(StatRow {
+        file: file.to_string(),
+        format: format!("{:?}", fmt).to_lowercase(),
+        records,
+        total_bases,
+        min_len,
+        max_len,
+        mean_len,
+        gc_pct,
+        n50,
+        l50,
+        q1_len,
+        median_len,
+        q3_len,
+        n_pct,
+        q10_pct,
+        q20_pct,
+        q30_pct,
+    })
 }
 
 fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {

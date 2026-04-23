@@ -1,6 +1,12 @@
 use anyhow::{bail, Context, Result};
+use bio::io::{fasta, fastq};
+use std::io::BufReader;
 
-use crate::{cli::HeadArgs, formats::SeqFormat, io, pairs};
+use crate::{
+    cli::{FormatArg, HeadArgs},
+    formats::SeqFormat,
+    io, pairs,
+};
 
 pub fn run(args: HeadArgs) -> Result<()> {
     let n = resolve_take(args.num, args.proportion)?;
@@ -24,9 +30,47 @@ pub fn run(args: HeadArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
+    if let Some(num) = args.num {
+        return run_single_streaming_num(&args, in_path, num);
+    }
     let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let keep = n(recs.len());
     io::write_records(&args.io.output, fmt, &args.io.compression, &recs[..keep])
+}
+
+fn run_single_streaming_num(args: &HeadArgs, in_path: Option<&str>, n: usize) -> Result<()> {
+    let fmt = if matches!(args.io.format, FormatArg::Auto) && matches!(in_path, None | Some("-")) {
+        let (fmt, recs) =
+            io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
+        let keep = n.min(recs.len());
+        return io::write_records(&args.io.output, fmt, &args.io.compression, &recs[..keep]);
+    } else {
+        io::resolve_seq_format(in_path, &args.io.format, &args.io.compression)?
+    };
+    let r = io::open_reader(in_path)?;
+    let r = io::wrap_decompress(r, in_path, &args.io.compression)?;
+    let w = io::open_writer(&args.io.output)?;
+    let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(BufReader::new(r));
+            let mut out = fasta::Writer::new(w);
+            for rec in fa.records().take(n) {
+                let rec = rec?;
+                out.write(rec.id(), rec.desc(), rec.seq())?;
+            }
+        }
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(BufReader::new(r));
+            let mut out = fastq::Writer::new(w);
+            for rec in fq.records().take(n) {
+                let rec = rec?;
+                out.write(rec.id(), rec.desc(), rec.seq(), rec.qual())?;
+            }
+        }
+        _ => bail!("head currently supports FASTA/FASTQ input"),
+    }
+    Ok(())
 }
 
 fn resolve_take(
