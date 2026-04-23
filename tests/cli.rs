@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use rust_htslib::bam;
 use std::fs;
@@ -24,9 +25,8 @@ fn fq2fa_works() {
     assert!(text.contains(">r1"));
 }
 
-
 #[test]
-fn fq2fa_respects_explicit_format_on_stdin() {
+fn fq2fa_respects_explicit_format_on_stdin_duplicate_guard() {
     Command::cargo_bin("seqit")
         .unwrap()
         .args(["fq2fa", "--format", "fastq"])
@@ -170,6 +170,33 @@ fn stats_supports_multiple_inputs() {
         .args(["stats", "tests/data/a.fa", "tests/data/a.fq", "-T"])
         .assert()
         .success();
+}
+
+#[test]
+fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "tests/data/a.fq", "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("q10_pct"))
+        .stdout(contains("q20_pct"))
+        .stdout(contains("q30_pct"))
+        .stdout(predicates::str::is_match("n50\\tl50").unwrap().not());
+}
+
+#[test]
+fn stats_all_mode_shows_na_for_mixed_assembly_and_read_only_metrics() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "tests/data/a.fa", "tests/data/a.fq", "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("n50\tl50"))
+        .stdout(contains("q10_pct\tq20_pct\tq30_pct"))
+        .stdout(contains("fastq"))
+        .stdout(contains("\tNA\tNA\t"))
+        .stdout(contains("fasta"));
 }
 
 #[test]
