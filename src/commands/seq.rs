@@ -1,22 +1,16 @@
 use std::collections::HashSet;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 
 use anyhow::{bail, Result};
 use bio::io::{fasta, fastq};
 
-use crate::cli::{FormatArg, SeqArgs};
+use crate::cli::SeqArgs;
 use crate::formats::SeqFormat;
 use crate::io;
 
 pub fn run(args: SeqArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    if matches!(args.io.format, FormatArg::Auto) && matches!(in_path, None | Some("-")) {
-        let (fmt, recs) =
-            io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
-        return run_from_records(args, fmt, recs);
-    }
-
-    let fmt = io::resolve_seq_format(in_path, &args.io.format, &args.io.compression)?;
+    let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
     if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
         bail!("seq currently supports FASTA/FASTQ input");
     }
@@ -24,9 +18,6 @@ pub fn run(args: SeqArgs) -> Result<()> {
         bail!("--min-qual/--max-qual require FASTQ records with qualities");
     }
 
-    let r = io::open_reader(in_path)?;
-    let r = io::wrap_decompress(r, in_path, &args.io.compression)?;
-    let br = BufReader::new(r);
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
     let mut bw = BufWriter::new(w);
@@ -70,33 +61,6 @@ pub fn run(args: SeqArgs) -> Result<()> {
         _ => bail!("format {:?} not yet implemented for seq output", fmt),
     }
 
-    bw.flush()?;
-    Ok(())
-}
-
-fn run_from_records(
-    args: SeqArgs,
-    fmt: SeqFormat,
-    recs: Vec<crate::formats::SeqRecord>,
-) -> Result<()> {
-    if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
-        bail!("seq currently supports FASTA/FASTQ input");
-    }
-    if (args.min_qual >= 0.0 || args.max_qual >= 0.0) && !matches!(fmt, SeqFormat::Fastq) {
-        bail!("--min-qual/--max-qual require FASTQ records with qualities");
-    }
-    let w = io::open_writer(&args.io.output)?;
-    let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut bw = BufWriter::new(w);
-    let gap_letters = args
-        .remove_gaps
-        .then(|| parse_gap_letters(&args.gap_letters));
-    for mut rec in recs {
-        if !process_record(&args, &gap_letters, &mut rec)? {
-            continue;
-        }
-        write_record(&args, fmt, &mut bw, &rec)?;
-    }
     bw.flush()?;
     Ok(())
 }

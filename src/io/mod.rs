@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 
 use anyhow::{bail, Context, Result};
 use bio::io::{fasta, fastq};
@@ -88,11 +88,44 @@ pub fn read_records_with_format(
     compression: &CompressionArg,
 ) -> Result<(SeqFormat, Vec<SeqRecord>)> {
     if matches!(format, FormatArg::Auto) && matches!(path, None | Some("-")) {
-        return read_records_detect_from_content(path, compression);
+        let r = open_reader(path)?;
+        let r = wrap_decompress(r, path, compression)?;
+        let mut br = BufReader::new(r);
+        let fmt = detect_format_from_bufread(&mut br)?;
+        let recs = match fmt {
+            SeqFormat::Fasta => read_fasta(br)?,
+            SeqFormat::Fastq => read_fastq(br)?,
+            _ => bail!("format {:?} not yet implemented for this command", fmt),
+        };
+        return Ok((fmt, recs));
     }
     let fmt = resolve_seq_format(path, format, compression)?;
     let recs = read_records(path, fmt, compression)?;
     Ok((fmt, recs))
+}
+
+pub fn open_seq_reader(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+) -> Result<(SeqFormat, BufReader<Box<dyn Read>>)> {
+    let r = open_reader(path)?;
+    let r = wrap_decompress(r, path, compression)?;
+    let mut br = BufReader::new(r);
+
+    let fmt = if let Some(fmt) = SeqFormat::from_arg(format) {
+        fmt
+    } else if let Ok(fmt) = SeqFormat::detect(path) {
+        if matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
+            fmt
+        } else {
+            detect_format_from_bufread(&mut br)?
+        }
+    } else {
+        detect_format_from_bufread(&mut br)?
+    };
+
+    Ok((fmt, br))
 }
 
 pub fn resolve_seq_format(
@@ -120,9 +153,13 @@ fn detect_format_from_stream(
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
     let mut br = BufReader::new(r);
+    detect_format_from_bufread(&mut br)
+}
+
+pub(crate) fn detect_format_from_bufread(reader: &mut impl BufRead) -> Result<SeqFormat> {
     let mut first = None;
     loop {
-        let buf = br.fill_buf()?;
+        let buf = reader.fill_buf()?;
         if buf.is_empty() {
             break;
         }
@@ -135,39 +172,9 @@ fn detect_format_from_stream(
             break;
         }
         let consumed = buf.len();
-        br.consume(consumed);
+        reader.consume(consumed);
     }
-    match first {
-        Some(b'>') => Ok(SeqFormat::Fasta),
-        Some(b'@') => Ok(SeqFormat::Fastq),
-        _ => bail!("Unable to auto-detect format from input content. Use --format."),
-    }
-}
 
-fn read_records_detect_from_content(
-    path: Option<&str>,
-    compression: &CompressionArg,
-) -> Result<(SeqFormat, Vec<SeqRecord>)> {
-    let r = open_reader(path)?;
-    let mut r = wrap_decompress(r, path, compression)?;
-    let mut buf = Vec::new();
-    r.read_to_end(&mut buf)?;
-
-    let fmt = detect_format_from_content(&buf)?;
-    let br = BufReader::new(Cursor::new(buf));
-    let recs = match fmt {
-        SeqFormat::Fasta => read_fasta(br)?,
-        SeqFormat::Fastq => read_fastq(br)?,
-        _ => bail!("format {:?} not yet implemented for this command", fmt),
-    };
-    Ok((fmt, recs))
-}
-
-fn detect_format_from_content(buf: &[u8]) -> Result<SeqFormat> {
-    let first = buf
-        .iter()
-        .copied()
-        .find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'));
     match first {
         Some(b'>') => Ok(SeqFormat::Fasta),
         Some(b'@') => Ok(SeqFormat::Fastq),

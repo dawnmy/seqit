@@ -137,6 +137,57 @@ fn sample_single_num_outputs_requested_count() {
 }
 
 #[test]
+fn sample_auto_detects_format_from_stdin_content() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["sample", "-n", "1", "-s", "7"])
+        .write_stdin(
+            "@r1
+ACGT
++
+!!!!
+@r2
+TGCA
++
+####
+",
+        )
+        .assert()
+        .success()
+        .stdout(contains("@"));
+}
+
+#[test]
+fn sample_paired_num_streaming_runs() {
+    let td = tempdir().unwrap();
+    let o1 = td.path().join("sample1.fq");
+    let o2 = td.path().join("sample2.fq");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sample",
+            "--in1",
+            "tests/data/a.fq",
+            "--in2",
+            "tests/data/b.fq",
+            "-n",
+            "2",
+            "-s",
+            "7",
+            "-o",
+            o1.to_str().unwrap(),
+            "-O",
+            o2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let t1 = fs::read_to_string(o1).unwrap();
+    let t2 = fs::read_to_string(o2).unwrap();
+    assert_eq!(t1.matches('@').count(), 2);
+    assert_eq!(t2.matches('@').count(), 2);
+}
+
+#[test]
 fn spike_supports_paired_short_i_i() {
     let td = tempdir().unwrap();
     let o1 = td.path().join("spike1.fq");
