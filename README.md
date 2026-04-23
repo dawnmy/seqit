@@ -53,8 +53,8 @@ Common options are unified across commands where relevant:
 - `-t, --threads` (set worker thread count; applies to all commands including `stats` and `spike`)
 - `-o, --output`
 - `-O, --output2`
-- `-i, --input` (paired read 1 for pair-aware commands)
-- `-I, --input2` (paired read 2 for pair-aware commands)
+- positional `INPUT` (single-end/single-file input)
+- `-i/-1` and `-I/-2` (paired read 1/read 2 for pair-aware commands)
 - `-s, --seed`
 - `--format`
 - `--compression`
@@ -170,8 +170,8 @@ seqit shuffle -i r1.fq -I r2.fq -s 42 -o shuf.r1.fq -O shuf.r2.fq
 ### spike
 
 ```bash
-seqit spike -i target.fa -a inserts.fa -s 123 -o spiked.fa
-seqit spike --input1 target.r1.fq -I target.r2.fq -a add.r1.fq -A add.r2.fq -s 123 -o out.r1.fq -O out.r2.fq
+seqit spike target.fa -a inserts.fa -s 123 -o spiked.fa
+seqit spike -i target.r1.fq -I target.r2.fq -a add.r1.fq -A add.r2.fq -s 123 -o out.r1.fq -O out.r2.fq
 ```
 
 ### head / tail
@@ -186,6 +186,8 @@ seqit head -i r1.fq -I r2.fq -n 50000 -o h1.fq -O h2.fq
 
 Pair-aware commands (`grep`, `sample`, `rmdup`, `rename`, `shuffle`, `spike`, `head`, `tail`) validate mate IDs and preserve pair lockstep.
 
+- Single-end mode: pass one positional `INPUT` (or stdin if omitted).
+- Paired-end mode: pass both `-i/-1` and `-I/-2` together. Mixed single + paired input flags are rejected.
 - By default, invalid pairs fail fast with example read IDs and a total invalid count.
 - Use `--allow-unpaired` to continue and skip invalid/unpaired records.
 - Pair operations are done at pair granularity (not independent mates).

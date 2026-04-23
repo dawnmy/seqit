@@ -1,9 +1,15 @@
 use anyhow::{bail, Context, Result};
 
-use crate::{cli::TailArgs, formats::SeqFormat, io, pairs};
+use crate::{cli::TailArgs, formats::SeqFormat, io, pairs, utils};
 
 pub fn run(args: TailArgs) -> Result<()> {
     let n = resolve_take(args.num, args.proportion)?;
+    utils::validate_input_mode(
+        "tail",
+        args.io.input.as_deref(),
+        args.input1.as_deref(),
+        args.input2.as_deref(),
+    )?;
     if let (Some(in1), Some(in2)) = (args.input1.as_deref(), args.input2.as_deref()) {
         let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
         let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;

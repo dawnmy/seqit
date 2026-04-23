@@ -2,17 +2,14 @@ use anyhow::{bail, Context, Result};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-use crate::{cli::SpikeArgs, formats::SeqFormat, io, pairs};
+use crate::{cli::SpikeArgs, formats::SeqFormat, io, pairs, utils};
 
 pub fn run(args: SpikeArgs) -> Result<()> {
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
-    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref()).or_else(|| {
-        if paired_in2.is_some() || args.add2.is_some() {
-            args.input.as_deref()
-        } else {
-            None
-        }
-    });
+    let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
+    let single_input = args.input.as_deref().or(args.input_legacy.as_deref());
+    utils::validate_input_mode("spike", single_input, paired_in1, paired_in2)?;
+
     if let (Some(in1), Some(in2), Some(add2)) = (paired_in1, paired_in2, args.add2.as_deref()) {
         let t1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.compression)?;
         let t2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.compression)?;
@@ -35,8 +32,8 @@ pub fn run(args: SpikeArgs) -> Result<()> {
             "paired spike requires R1 + R2 target inputs and R1 + R2 spike-in inputs together (use -i/-I with -a/-A, or --in1/--in2 with --add/--add2)"
         );
     }
-    let input = args.input.as_deref();
-    let (fmt, target) = io::read_records_with_format(input, &args.format, &args.compression)?;
+    let (fmt, target) =
+        io::read_records_with_format(single_input, &args.format, &args.compression)?;
     let add = io::read_records(Some(&args.add), fmt, &args.compression)?;
     let out = spike_single(target, add, args.seed);
     io::write_records(&args.output, fmt, &args.compression, &out)

@@ -8,7 +8,7 @@ use std::io::{BufReader, BufWriter};
 use crate::{
     cli::SampleArgs,
     formats::{SeqFormat, SeqRecord},
-    io,
+    io, utils,
 };
 
 pub fn run(args: SampleArgs) -> Result<()> {
@@ -24,6 +24,7 @@ pub fn run(args: SampleArgs) -> Result<()> {
 
     let paired_in1 = args.input1.as_deref().or(args.in1.as_deref());
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
+    utils::validate_input_mode("sample", args.io.input.as_deref(), paired_in1, paired_in2)?;
     if let (Some(in1), Some(in2)) = (paired_in1, paired_in2) {
         log_info(&args, "sample paired-end mode");
         let out2 = args
