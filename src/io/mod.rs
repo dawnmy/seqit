@@ -87,19 +87,61 @@ pub fn read_records_with_format(
     format: &FormatArg,
     compression: &CompressionArg,
 ) -> Result<(SeqFormat, Vec<SeqRecord>)> {
+    if matches!(format, FormatArg::Auto) && matches!(path, None | Some("-")) {
+        return read_records_detect_from_content(path, compression);
+    }
+    let fmt = resolve_seq_format(path, format, compression)?;
+    let recs = read_records(path, fmt, compression)?;
+    Ok((fmt, recs))
+}
+
+pub fn resolve_seq_format(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+) -> Result<SeqFormat> {
     if let Some(fmt) = SeqFormat::from_arg(format) {
-        let recs = read_records(path, fmt, compression)?;
-        return Ok((fmt, recs));
+        return Ok(fmt);
     }
 
     if let Ok(fmt) = SeqFormat::detect(path) {
         if matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
-            let recs = read_records(path, fmt, compression)?;
-            return Ok((fmt, recs));
+            return Ok(fmt);
         }
     }
 
-    read_records_detect_from_content(path, compression)
+    detect_format_from_stream(path, compression)
+}
+
+fn detect_format_from_stream(
+    path: Option<&str>,
+    compression: &CompressionArg,
+) -> Result<SeqFormat> {
+    let r = open_reader(path)?;
+    let r = wrap_decompress(r, path, compression)?;
+    let mut br = BufReader::new(r);
+    let mut first = None;
+    loop {
+        let buf = br.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        if let Some(b) = buf
+            .iter()
+            .copied()
+            .find(|c| !matches!(c, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            first = Some(b);
+            break;
+        }
+        let consumed = buf.len();
+        br.consume(consumed);
+    }
+    match first {
+        Some(b'>') => Ok(SeqFormat::Fasta),
+        Some(b'@') => Ok(SeqFormat::Fastq),
+        _ => bail!("Unable to auto-detect format from input content. Use --format."),
+    }
 }
 
 fn read_records_detect_from_content(

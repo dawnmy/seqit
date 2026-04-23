@@ -17,6 +17,24 @@ use crate::{
 
 pub fn run(args: GrepArgs) -> Result<()> {
     let patterns = load_patterns(&args)?;
+    if !args.io.quiet {
+        if let Some(path) = &args.pattern_file {
+            eprintln!(
+                "[INFO] {} patterns loaded from file '{}'",
+                patterns.len(),
+                path
+            );
+        } else {
+            eprintln!("[INFO] {} pattern(s) loaded", patterns.len());
+        }
+        if args.count {
+            eprintln!("[INFO] grep count mode");
+        } else if args.only_names {
+            eprintln!("[INFO] grep names mode");
+        } else {
+            eprintln!("[INFO] grep record output mode");
+        }
+    }
     let matcher = Matcher::new(&patterns, &args.by, &args)?;
 
     if let (Some(in1), Some(in2)) = (args.in1.as_deref(), args.in2.as_deref()) {

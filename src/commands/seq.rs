@@ -1,90 +1,104 @@
 use std::collections::HashSet;
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Write};
 
 use anyhow::{bail, Result};
-use rayon::prelude::*;
+use bio::io::{fasta, fastq};
 
-use crate::cli::SeqArgs;
+use crate::cli::{FormatArg, SeqArgs};
 use crate::formats::SeqFormat;
 use crate::io;
 
 pub fn run(args: SeqArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    let (fmt, mut recs) =
-        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
+    if matches!(args.io.format, FormatArg::Auto) && matches!(in_path, None | Some("-")) {
+        let (fmt, recs) =
+            io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
+        return run_from_records(args, fmt, recs);
+    }
+
+    let fmt = io::resolve_seq_format(in_path, &args.io.format, &args.io.compression)?;
     if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
         bail!("seq currently supports FASTA/FASTQ input");
     }
-    let qual_filter_enabled = args.min_qual >= 0.0 || args.max_qual >= 0.0;
-    if qual_filter_enabled && recs.iter().any(|r| r.qual.is_none()) {
+    if (args.min_qual >= 0.0 || args.max_qual >= 0.0) && !matches!(fmt, SeqFormat::Fastq) {
         bail!("--min-qual/--max-qual require FASTQ records with qualities");
     }
 
-    recs = recs
-        .into_par_iter()
-        .filter(|r| {
-            let len = r.seq.len();
-            let len_ok = args.min_len.map(|m| len >= m).unwrap_or(true)
-                && args.max_len.map(|m| len <= m).unwrap_or(true);
-            let qual_ok = if qual_filter_enabled {
-                r.qual
-                    .as_ref()
-                    .map(|q| {
-                        let avg = average_quality(q, args.qual_ascii_base);
-                        (args.min_qual < 0.0 || avg >= args.min_qual)
-                            && (args.max_qual < 0.0 || avg <= args.max_qual)
-                    })
-                    .unwrap_or(false)
-            } else {
-                true
-            };
-            len_ok && qual_ok
-        })
-        .collect();
+    let r = io::open_reader(in_path)?;
+    let r = io::wrap_decompress(r, in_path, &args.io.compression)?;
+    let br = BufReader::new(r);
+    let w = io::open_writer(&args.io.output)?;
+    let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
+    let mut bw = BufWriter::new(w);
 
-    let gap_letters = if args.remove_gaps {
-        Some(parse_gap_letters(&args.gap_letters))
-    } else {
-        None
-    };
-
-    recs.par_iter_mut().for_each(|r| {
-        if args.revcomp {
-            r.seq = crate::utils::revcomp(&r.seq);
-            if let Some(q) = &mut r.qual {
-                q.reverse();
-            }
-        } else {
-            if args.rev {
-                r.seq.reverse();
-                if let Some(q) = &mut r.qual {
-                    q.reverse();
+    let gap_letters = args
+        .remove_gaps
+        .then(|| parse_gap_letters(&args.gap_letters));
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for r in fa.records() {
+                let r = r?;
+                let mut rec = crate::formats::SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: None,
+                };
+                if !process_record(&args, &gap_letters, &mut rec)? {
+                    continue;
                 }
-            }
-            if args.comp {
-                r.seq = crate::utils::revcomp(&r.seq).into_iter().rev().collect();
+                write_record(&args, fmt, &mut bw, &rec)?;
             }
         }
-        if args.upper {
-            r.seq.make_ascii_uppercase();
-        }
-        if args.lower {
-            r.seq.make_ascii_lowercase();
-        }
-        if let Some(gaps) = &gap_letters {
-            r.seq.retain(|b| !gaps.contains(b));
-        }
-    });
-
-    if args.validate_seq {
-        for r in &recs {
-            if let Some(ch) = find_invalid_iupac(&r.seq) {
-                bail!("record '{}' contains invalid base '{}'", r.id, ch as char);
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for r in fq.records() {
+                let r = r?;
+                let mut rec = crate::formats::SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: Some(r.qual().to_vec()),
+                };
+                if !process_record(&args, &gap_letters, &mut rec)? {
+                    continue;
+                }
+                write_record(&args, fmt, &mut bw, &rec)?;
             }
         }
+        _ => bail!("format {:?} not yet implemented for seq output", fmt),
     }
 
-    write_output(&args, fmt, &recs)
+    bw.flush()?;
+    Ok(())
+}
+
+fn run_from_records(
+    args: SeqArgs,
+    fmt: SeqFormat,
+    recs: Vec<crate::formats::SeqRecord>,
+) -> Result<()> {
+    if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
+        bail!("seq currently supports FASTA/FASTQ input");
+    }
+    if (args.min_qual >= 0.0 || args.max_qual >= 0.0) && !matches!(fmt, SeqFormat::Fastq) {
+        bail!("--min-qual/--max-qual require FASTQ records with qualities");
+    }
+    let w = io::open_writer(&args.io.output)?;
+    let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
+    let mut bw = BufWriter::new(w);
+    let gap_letters = args
+        .remove_gaps
+        .then(|| parse_gap_letters(&args.gap_letters));
+    for mut rec in recs {
+        if !process_record(&args, &gap_letters, &mut rec)? {
+            continue;
+        }
+        write_record(&args, fmt, &mut bw, &rec)?;
+    }
+    bw.flush()?;
+    Ok(())
 }
 
 fn average_quality(qual: &[u8], ascii_base: u8) -> f64 {
@@ -125,48 +139,104 @@ fn find_invalid_iupac(seq: &[u8]) -> Option<u8> {
     })
 }
 
-fn write_output(args: &SeqArgs, fmt: SeqFormat, recs: &[crate::formats::SeqRecord]) -> Result<()> {
-    let w = io::open_writer(&args.io.output)?;
-    let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut bw = BufWriter::new(w);
+fn process_record(
+    args: &SeqArgs,
+    gap_letters: &Option<HashSet<u8>>,
+    rec: &mut crate::formats::SeqRecord,
+) -> Result<bool> {
+    let len = rec.seq.len();
+    let len_ok = args.min_len.map(|m| len >= m).unwrap_or(true)
+        && args.max_len.map(|m| len <= m).unwrap_or(true);
+    if !len_ok {
+        return Ok(false);
+    }
 
-    for r in recs {
-        if args.seq {
-            write_line(&mut bw, &render_seq(&r.seq, args.color))?;
-            continue;
-        }
-        if args.only_id {
-            write_line(&mut bw, &r.id)?;
-            continue;
-        }
-        if args.name {
-            if args.full_name {
-                write_line(&mut bw, &r.name())?;
-            } else {
-                write_line(&mut bw, &r.id)?;
-            }
-            continue;
-        }
-
-        match fmt {
-            SeqFormat::Fasta => {
-                write_line(&mut bw, &format!(">{}", r.name()))?;
-                write_line(&mut bw, &render_seq(&r.seq, args.color))?;
-            }
-            SeqFormat::Fastq => {
-                write_line(&mut bw, &format!("@{}", r.name()))?;
-                write_line(&mut bw, &render_seq(&r.seq, args.color))?;
-                write_line(&mut bw, "+")?;
-                let Some(q) = &r.qual else {
-                    bail!("record '{}' missing qualities for FASTQ output", r.id);
-                };
-                write_line(&mut bw, &String::from_utf8_lossy(q))?;
-            }
-            _ => bail!("format {:?} not yet implemented for seq output", fmt),
+    let qual_filter_enabled = args.min_qual >= 0.0 || args.max_qual >= 0.0;
+    if qual_filter_enabled {
+        let Some(q) = &rec.qual else {
+            bail!("--min-qual/--max-qual require FASTQ records with qualities");
+        };
+        let avg = average_quality(q, args.qual_ascii_base);
+        if (args.min_qual >= 0.0 && avg < args.min_qual)
+            || (args.max_qual >= 0.0 && avg > args.max_qual)
+        {
+            return Ok(false);
         }
     }
 
-    bw.flush()?;
+    if args.revcomp {
+        rec.seq = crate::utils::revcomp(&rec.seq);
+        if let Some(q) = &mut rec.qual {
+            q.reverse();
+        }
+    } else {
+        if args.rev {
+            rec.seq.reverse();
+            if let Some(q) = &mut rec.qual {
+                q.reverse();
+            }
+        }
+        if args.comp {
+            rec.seq = crate::utils::revcomp(&rec.seq).into_iter().rev().collect();
+        }
+    }
+    if args.upper {
+        rec.seq.make_ascii_uppercase();
+    }
+    if args.lower {
+        rec.seq.make_ascii_lowercase();
+    }
+    if let Some(gaps) = gap_letters {
+        rec.seq.retain(|b| !gaps.contains(b));
+    }
+    if args.validate_seq {
+        if let Some(ch) = find_invalid_iupac(&rec.seq) {
+            bail!("record '{}' contains invalid base '{}'", rec.id, ch as char);
+        }
+    }
+
+    Ok(true)
+}
+
+fn write_record(
+    args: &SeqArgs,
+    fmt: SeqFormat,
+    bw: &mut impl Write,
+    rec: &crate::formats::SeqRecord,
+) -> Result<()> {
+    if args.seq {
+        write_line(bw, &render_seq(&rec.seq, args.color))?;
+        return Ok(());
+    }
+    if args.only_id {
+        write_line(bw, &rec.id)?;
+        return Ok(());
+    }
+    if args.name {
+        if args.full_name {
+            write_line(bw, &rec.name())?;
+        } else {
+            write_line(bw, &rec.id)?;
+        }
+        return Ok(());
+    }
+
+    match fmt {
+        SeqFormat::Fasta => {
+            write_line(bw, &format!(">{}", rec.name()))?;
+            write_line(bw, &render_seq(&rec.seq, args.color))?;
+        }
+        SeqFormat::Fastq => {
+            write_line(bw, &format!("@{}", rec.name()))?;
+            write_line(bw, &render_seq(&rec.seq, args.color))?;
+            write_line(bw, "+")?;
+            let Some(q) = &rec.qual else {
+                bail!("record '{}' missing qualities for FASTQ output", rec.id);
+            };
+            write_line(bw, &String::from_utf8_lossy(q))?;
+        }
+        _ => bail!("format {:?} not yet implemented for seq output", fmt),
+    }
     Ok(())
 }
 

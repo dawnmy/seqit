@@ -396,6 +396,12 @@ pub struct SampleArgs {
     #[arg(short = 's', long = "seed", default_value_t = 42, help = "Random seed")]
     pub seed: u64,
     #[arg(
+        long = "progress",
+        action = ArgAction::SetTrue,
+        help = "Show progress on stderr while scanning records"
+    )]
+    pub progress: bool,
+    #[arg(
         long = "allow-unpaired",
         action = ArgAction::SetTrue,
         help = "Continue when paired reads are invalid; skip unpaired records"

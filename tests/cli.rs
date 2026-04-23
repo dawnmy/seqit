@@ -3,6 +3,7 @@ use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use rust_htslib::bam;
 use std::fs;
+use std::process::Command as ProcessCommand;
 use tempfile::tempdir;
 
 #[test]
@@ -112,6 +113,30 @@ fn spike_single_runs() {
 }
 
 #[test]
+fn sample_single_num_outputs_requested_count() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("sample.fq");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sample",
+            "tests/data/a.fq",
+            "--format",
+            "fastq",
+            "-n",
+            "2",
+            "-o",
+            out.to_str().unwrap(),
+            "-s",
+            "7",
+        ])
+        .assert()
+        .success();
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text.matches('@').count(), 2);
+}
+
+#[test]
 fn spike_supports_paired_short_i_i() {
     let td = tempdir().unwrap();
     let o1 = td.path().join("spike1.fq");
@@ -161,6 +186,17 @@ fn stats_pretty_table_runs() {
         .args(["stats", "tests/data/a.fa"])
         .assert()
         .success();
+}
+
+#[test]
+fn stats_auto_detects_format_from_stdin_content() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin("@r1\nACGT\n+\n!!!!\n")
+        .assert()
+        .success()
+        .stdout(contains("fastq"));
 }
 
 #[test]
@@ -515,6 +551,25 @@ fn rename_help_includes_examples_and_template_placeholders() {
         .stdout(contains("Template supports prefix and index placeholders"))
         .stdout(contains("--map-file id_map.tsv"))
         .stdout(contains("--match-regex '^sample_(\\\\d+)$'"));
+}
+
+#[test]
+fn seq_piped_to_head_exits_cleanly_without_broken_pipe_error() {
+    let bin = assert_cmd::cargo::cargo_bin("seqit");
+    let output = ProcessCommand::new("bash")
+        .args([
+            "-lc",
+            &format!(
+                "set -o pipefail; {} seq -n tests/data/a.fq | head -n 1 >/dev/null",
+                bin.display()
+            ),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Broken pipe"));
 }
 
 #[test]
