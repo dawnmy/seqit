@@ -26,8 +26,8 @@ pub fn run(args: ShuffleArgs) -> Result<()> {
         return Ok(());
     }
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
-    let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (fmt, mut recs) =
+        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     use rand::seq::SliceRandom;
     recs.shuffle(&mut rng);
     io::write_records(&args.io.output, fmt, &args.io.compression, &recs)

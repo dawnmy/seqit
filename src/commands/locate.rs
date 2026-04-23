@@ -6,7 +6,8 @@ use std::{
 use anyhow::{bail, Result};
 use regex::{Regex, RegexBuilder};
 
-use crate::{cli::LocateArgs, formats::SeqFormat, io};
+use crate::cli::LocateArgs;
+use crate::io;
 
 pub fn run(args: LocateArgs) -> Result<()> {
     let pats = load_patterns(&args)?;
@@ -33,8 +34,8 @@ pub fn run(args: LocateArgs) -> Result<()> {
         None
     };
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
-    let recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (_fmt, recs) =
+        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
 
     for r in recs {
         let text = String::from_utf8_lossy(&r.seq).to_string();

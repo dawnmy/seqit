@@ -22,7 +22,6 @@ impl SeqFormat {
         }
     }
 
-
     pub fn from_arg_or_detect(arg: &FormatArg, path: Option<&str>) -> Result<Self> {
         if let Some(fmt) = Self::from_arg(arg) {
             Ok(fmt)

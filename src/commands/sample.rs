@@ -51,8 +51,7 @@ pub fn run(args: SampleArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
-    let recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let out = if let Some(rate) = args.rate {
         recs.into_iter()
             .filter(|_| rng.random::<f64>() <= rate)

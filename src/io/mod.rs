@@ -1,10 +1,10 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Write};
 
 use anyhow::{bail, Context, Result};
 use bio::io::{fasta, fastq};
 
-use crate::cli::CompressionArg;
+use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
 pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
@@ -79,6 +79,57 @@ pub fn read_records(
         SeqFormat::Fasta => read_fasta(br),
         SeqFormat::Fastq => read_fastq(br),
         _ => bail!("format {:?} not yet implemented for this command", format),
+    }
+}
+
+pub fn read_records_with_format(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+) -> Result<(SeqFormat, Vec<SeqRecord>)> {
+    if let Some(fmt) = SeqFormat::from_arg(format) {
+        let recs = read_records(path, fmt, compression)?;
+        return Ok((fmt, recs));
+    }
+
+    if let Ok(fmt) = SeqFormat::detect(path) {
+        if matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
+            let recs = read_records(path, fmt, compression)?;
+            return Ok((fmt, recs));
+        }
+    }
+
+    read_records_detect_from_content(path, compression)
+}
+
+fn read_records_detect_from_content(
+    path: Option<&str>,
+    compression: &CompressionArg,
+) -> Result<(SeqFormat, Vec<SeqRecord>)> {
+    let r = open_reader(path)?;
+    let mut r = wrap_decompress(r, path, compression)?;
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf)?;
+
+    let fmt = detect_format_from_content(&buf)?;
+    let br = BufReader::new(Cursor::new(buf));
+    let recs = match fmt {
+        SeqFormat::Fasta => read_fasta(br)?,
+        SeqFormat::Fastq => read_fastq(br)?,
+        _ => bail!("format {:?} not yet implemented for this command", fmt),
+    };
+    Ok((fmt, recs))
+}
+
+fn detect_format_from_content(buf: &[u8]) -> Result<SeqFormat> {
+    let first = buf
+        .iter()
+        .copied()
+        .find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'));
+    match first {
+        Some(b'>') => Ok(SeqFormat::Fasta),
+        Some(b'@') => Ok(SeqFormat::Fastq),
+        _ => bail!("Unable to auto-detect format from input content. Use --format."),
     }
 }
 

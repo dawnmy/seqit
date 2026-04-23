@@ -24,8 +24,7 @@ pub fn run(args: HeadArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg_or_detect(&args.io.format, in_path)?;
-    let recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let keep = n(recs.len());
     io::write_records(&args.io.output, fmt, &args.io.compression, &recs[..keep])
 }
