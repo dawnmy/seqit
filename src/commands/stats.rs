@@ -102,7 +102,7 @@ pub fn run(args: StatsArgs) -> Result<()> {
 }
 
 fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
-    let fmt = SeqFormat::from_arg(&args.format).unwrap_or(SeqFormat::detect(Some(p))?);
+    let fmt = SeqFormat::from_arg_or_detect(&args.format, Some(p))?;
     match fmt {
         SeqFormat::Fasta | SeqFormat::Fastq => {
             let recs = io::read_records(Some(p), fmt, &crate::cli::CompressionArg::Auto)?;

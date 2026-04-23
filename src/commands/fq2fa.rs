@@ -7,11 +7,19 @@ use crate::io;
 
 pub fn run(args: Fq2faArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
-    if fmt != SeqFormat::Fastq {
-        bail!("fq2fa requires FASTQ input")
-    }
-    let mut recs = io::read_records(in_path, SeqFormat::Fastq, &args.io.compression)?;
+    let mut recs = if let Some(fmt) = SeqFormat::from_arg(&args.io.format) {
+        if fmt != SeqFormat::Fastq {
+            bail!("fq2fa requires FASTQ input")
+        }
+        io::read_records(in_path, SeqFormat::Fastq, &args.io.compression)?
+    } else {
+        let (fmt, recs) =
+            io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
+        if fmt != SeqFormat::Fastq {
+            bail!("fq2fa requires FASTQ input")
+        }
+        recs
+    };
     recs.par_iter_mut().for_each(|r| {
         r.qual = None;
     });

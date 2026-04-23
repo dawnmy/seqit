@@ -10,11 +10,11 @@ use crate::io;
 
 pub fn run(args: SeqArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
+    let (fmt, mut recs) =
+        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
         bail!("seq currently supports FASTA/FASTQ input");
     }
-    let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
     let qual_filter_enabled = args.min_qual >= 0.0 || args.max_qual >= 0.0;
     if qual_filter_enabled && recs.iter().any(|r| r.qual.is_none()) {
         bail!("--min-qual/--max-qual require FASTQ records with qualities");

@@ -25,6 +25,28 @@ fn fq2fa_works() {
 }
 
 #[test]
+fn fq2fa_respects_explicit_format_on_stdin() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["fq2fa", "--format", "fastq"])
+        .write_stdin("@r1\nACGT\n+\n!!!!\n")
+        .assert()
+        .success()
+        .stdout(contains(">r1\nACGT"));
+}
+
+#[test]
+fn seq_auto_detects_format_from_stdin_content() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq"])
+        .write_stdin("@r1\nACGT\n+\n!!!!\n")
+        .assert()
+        .success()
+        .stdout(contains("@r1\nACGT"));
+}
+
+#[test]
 fn paired_shuffle_is_deterministic() {
     let td = tempdir().unwrap();
     let o1 = td.path().join("o1.fq");

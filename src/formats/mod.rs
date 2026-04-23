@@ -22,6 +22,14 @@ impl SeqFormat {
         }
     }
 
+    pub fn from_arg_or_detect(arg: &FormatArg, path: Option<&str>) -> Result<Self> {
+        if let Some(fmt) = Self::from_arg(arg) {
+            Ok(fmt)
+        } else {
+            Self::detect(path)
+        }
+    }
+
     pub fn detect(path: Option<&str>) -> Result<Self> {
         let p = path.unwrap_or("-");
         let stripped = p

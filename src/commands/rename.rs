@@ -59,8 +59,8 @@ pub fn run(args: RenameArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
-    let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (fmt, mut recs) =
+        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     for (i, r) in recs.iter_mut().enumerate() {
         r.id = rename_id(&args, mode, i, &r.id, &mapping, regex.as_ref(), replacement)?;
     }

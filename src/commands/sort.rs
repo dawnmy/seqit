@@ -5,16 +5,16 @@ use rayon::slice::ParallelSliceMut;
 
 use crate::{
     cli::{SortArgs, SortBy},
-    formats::{SeqFormat, SeqRecord},
+    formats::SeqRecord,
     io,
     utils::parse_mem_bytes,
 };
 
 pub fn run(args: SortArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
+    let (fmt, mut recs) =
+        io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let _mem_limit_bytes = parse_mem_bytes(&args.mem);
-    let mut recs = io::read_records(in_path, fmt, &args.io.compression)?;
     recs.par_sort_by(|a, b| compare_records(a, b, &args.by, args.numeric));
     if args.reverse {
         recs.reverse();

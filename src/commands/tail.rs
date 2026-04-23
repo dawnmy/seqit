@@ -25,8 +25,7 @@ pub fn run(args: TailArgs) -> Result<()> {
     }
 
     let in_path = args.io.input.as_deref();
-    let fmt = SeqFormat::from_arg(&args.io.format).unwrap_or(SeqFormat::detect(in_path)?);
-    let recs = io::read_records(in_path, fmt, &args.io.compression)?;
+    let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let keep = n(recs.len());
     let start = recs.len().saturating_sub(keep);
     io::write_records(&args.io.output, fmt, &args.io.compression, &recs[start..])
