@@ -11,10 +11,12 @@ pub fn run(args: SpikeArgs) -> Result<()> {
     utils::validate_input_mode("spike", single_input, paired_in1, paired_in2)?;
 
     if let (Some(in1), Some(in2), Some(add2)) = (paired_in1, paired_in2, args.add2.as_deref()) {
-        let t1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.compression)?;
-        let t2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.compression)?;
-        let a1 = io::read_records(Some(&args.add), SeqFormat::Fastq, &args.compression)?;
-        let a2 = io::read_records(Some(add2), SeqFormat::Fastq, &args.compression)?;
+        let (target_pair, add_pair) = rayon::join(
+            || io::read_record_pair_parallel(in1, in2, SeqFormat::Fastq, &args.compression),
+            || io::read_record_pair_parallel(&args.add, add2, SeqFormat::Fastq, &args.compression),
+        );
+        let (t1, t2) = target_pair?;
+        let (a1, a2) = add_pair?;
         let (t1, t2) = pairs::prepare_paired_records(t1, t2, args.allow_unpaired)?;
         let (a1, a2) = pairs::prepare_paired_records(a1, a2, args.allow_unpaired)?;
         let out2 = args
@@ -22,8 +24,14 @@ pub fn run(args: SpikeArgs) -> Result<()> {
             .as_deref()
             .context("paired spike requires --output2")?;
         let (o1, o2) = spike_pairs(t1, t2, a1, a2, args.seed);
-        io::write_records(&args.output, SeqFormat::Fastq, &args.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.compression, &o2)?;
+        io::write_record_pair_parallel(
+            &args.output,
+            out2,
+            SeqFormat::Fastq,
+            &args.compression,
+            &o1,
+            &o2,
+        )?;
         return Ok(());
     }
 

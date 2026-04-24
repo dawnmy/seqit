@@ -1,5 +1,5 @@
 use ahash::AHashMap;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read};
@@ -81,6 +81,17 @@ struct AllColumns {
 
 #[derive(Default, Clone, Copy)]
 struct SeqTypeCounts {
+    alpha: usize,
+    non_nuc_alpha: usize,
+    u: usize,
+    t: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SeqLineMetrics {
+    len: usize,
+    gc: usize,
+    n: usize,
     alpha: usize,
     non_nuc_alpha: usize,
     u: usize,
@@ -240,27 +251,45 @@ fn build_seq_row_streaming(file: &str, format_arg: &crate::cli::FormatArg) -> Re
     }
 }
 
-fn build_fasta_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
-    let fa = bio::io::fasta::Reader::new(reader);
+fn build_fasta_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut acc = SeqAcc::new();
     let mut lens = LenDist::default();
     let mut n_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
+    let mut line = String::new();
+    let mut in_record = false;
+    let mut current_len = 0usize;
+    let mut current_gc = 0usize;
 
-    for r in fa.records() {
-        let r = r?;
-        let seq = r.seq();
-        let len = seq.len();
-        acc = acc.merge(SeqAcc::with_record(
-            len,
-            bytecount::count(seq, b'G')
-                + bytecount::count(seq, b'g')
-                + bytecount::count(seq, b'C')
-                + bytecount::count(seq, b'c'),
-        ));
-        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
-        update_seq_type_counts(seq, &mut type_counts);
-        lens.add(len);
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        let bytes = trim_line_ending(line.as_bytes());
+        if bytes.starts_with(b">") {
+            if in_record {
+                acc = acc.merge(SeqAcc::with_record(current_len, current_gc));
+                lens.add(current_len);
+            }
+            in_record = true;
+            current_len = 0;
+            current_gc = 0;
+        } else if in_record {
+            let metrics = seq_line_metrics(bytes);
+            current_len += metrics.len;
+            current_gc += metrics.gc;
+            n_bases += metrics.n;
+            update_seq_type_counts_from_metrics(metrics, &mut type_counts);
+        } else if !bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            bail!("FASTA sequence data encountered before first header in '{file}'");
+        }
+    }
+
+    if in_record {
+        acc = acc.merge(SeqAcc::with_record(current_len, current_gc));
+        lens.add(current_len);
     }
 
     finalize_seq_row(
@@ -274,8 +303,7 @@ fn build_fasta_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
     )
 }
 
-fn build_fastq_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
-    let fq = bio::io::fastq::Reader::new(reader);
+fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut acc = SeqAcc::new();
     let mut lens = LenDist::default();
     let mut n_bases = 0usize;
@@ -284,35 +312,71 @@ fn build_fastq_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
     let mut q_ge_30 = 0usize;
     let mut qual_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
+    let mut line = String::new();
 
-    for r in fq.records() {
-        let r = r?;
-        let seq = r.seq();
-        let len = seq.len();
-        acc = acc.merge(SeqAcc::with_record(
-            len,
-            bytecount::count(seq, b'G')
-                + bytecount::count(seq, b'g')
-                + bytecount::count(seq, b'C')
-                + bytecount::count(seq, b'c'),
-        ));
-        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
-        update_seq_type_counts(seq, &mut type_counts);
-        lens.add(len);
-
-        for q in r.qual().iter().copied() {
-            let phred = q.saturating_sub(33);
-            if phred >= 10 {
-                q_ge_10 += 1;
-            }
-            if phred >= 20 {
-                q_ge_20 += 1;
-            }
-            if phred >= 30 {
-                q_ge_30 += 1;
-            }
-            qual_bases += 1;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
         }
+        if !line.starts_with('@') {
+            bail!("FASTQ record in '{file}' does not start with '@'");
+        }
+
+        let mut lines_read = 0usize;
+        let mut seq_len = 0usize;
+        let mut seq_gc = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                bail!("incomplete FASTQ record in '{file}': missing '+' separator");
+            }
+            if line.starts_with('+') {
+                break;
+            }
+            let bytes = trim_line_ending(line.as_bytes());
+            let metrics = seq_line_metrics(bytes);
+            seq_len += metrics.len;
+            seq_gc += metrics.gc;
+            n_bases += metrics.n;
+            update_seq_type_counts_from_metrics(metrics, &mut type_counts);
+            lines_read += 1;
+        }
+        if lines_read == 0 {
+            bail!("incomplete FASTQ record in '{file}': missing sequence");
+        }
+
+        let mut qual_len = 0usize;
+        for _ in 0..lines_read {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                bail!("incomplete FASTQ record in '{file}': missing qualities");
+            }
+            let qual = trim_line_ending(line.as_bytes());
+            qual_len += qual.len();
+            for q in qual.iter().copied() {
+                let phred = q.saturating_sub(33);
+                if phred >= 10 {
+                    q_ge_10 += 1;
+                }
+                if phred >= 20 {
+                    q_ge_20 += 1;
+                }
+                if phred >= 30 {
+                    q_ge_30 += 1;
+                }
+                qual_bases += 1;
+            }
+        }
+        if qual_len != seq_len {
+            bail!(
+                "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
+            );
+        }
+
+        acc = acc.merge(SeqAcc::with_record(seq_len, seq_gc));
+        lens.add(seq_len);
     }
 
     let q_pcts = (
@@ -768,6 +832,48 @@ fn tsv_all_row(r: &StatRow, columns: AllColumns) -> String {
         ]);
     }
     fields.join("\t")
+}
+
+fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if bytes.ends_with(b"\n") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.ends_with(b"\r") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn seq_line_metrics(seq: &[u8]) -> SeqLineMetrics {
+    let mut metrics = SeqLineMetrics {
+        len: seq.len(),
+        ..SeqLineMetrics::default()
+    };
+    for &b in seq {
+        match b {
+            b'G' | b'g' | b'C' | b'c' => metrics.gc += 1,
+            b'N' | b'n' => metrics.n += 1,
+            _ => {}
+        }
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
+        metrics.alpha += 1;
+        match b.to_ascii_uppercase() {
+            b'U' => metrics.u += 1,
+            b'T' => metrics.t += 1,
+            b'A' | b'C' | b'G' | b'N' => {}
+            _ => metrics.non_nuc_alpha += 1,
+        }
+    }
+    metrics
+}
+
+fn update_seq_type_counts_from_metrics(metrics: SeqLineMetrics, counts: &mut SeqTypeCounts) {
+    counts.alpha += metrics.alpha;
+    counts.non_nuc_alpha += metrics.non_nuc_alpha;
+    counts.u += metrics.u;
+    counts.t += metrics.t;
 }
 
 fn update_seq_type_counts(seq: &[u8], counts: &mut SeqTypeCounts) {

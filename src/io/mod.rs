@@ -40,8 +40,12 @@ pub fn wrap_decompress(
     mode: &CompressionArg,
 ) -> Result<Box<dyn Read>> {
     match detect_compression(path, mode) {
-        CompressionArg::Gz => Ok(Box::new(flate2::read::MultiGzDecoder::new(reader))),
-        CompressionArg::Xz => Ok(Box::new(xz2::read::XzDecoder::new(reader))),
+        CompressionArg::Gz => Ok(Box::new(flate2::bufread::MultiGzDecoder::new(
+            BufReader::with_capacity(BUFFER_SIZE, reader),
+        ))),
+        CompressionArg::Xz => Ok(Box::new(xz2::bufread::XzDecoder::new_multi_decoder(
+            BufReader::with_capacity(BUFFER_SIZE, reader),
+        ))),
         _ => Ok(reader),
     }
 }
@@ -90,6 +94,29 @@ pub fn read_records(
         SeqFormat::Fastq => read_fastq(br),
         _ => bail!("format {:?} not yet implemented for this command", format),
     }
+}
+
+pub fn read_record_pair_parallel(
+    in1: &str,
+    in2: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+) -> Result<(Vec<SeqRecord>, Vec<SeqRecord>)> {
+    if can_parallel_read(in1, in2) {
+        let (r1, r2) = rayon::join(
+            || read_records(Some(in1), format, compression),
+            || read_records(Some(in2), format, compression),
+        );
+        Ok((r1?, r2?))
+    } else {
+        let r1 = read_records(Some(in1), format, compression)?;
+        let r2 = read_records(Some(in2), format, compression)?;
+        Ok((r1, r2))
+    }
+}
+
+fn can_parallel_read(in1: &str, in2: &str) -> bool {
+    in1 != "-" && in2 != "-"
 }
 
 pub fn read_records_with_format(
@@ -206,6 +233,32 @@ pub fn write_records(
     }
     bw.flush()?;
     Ok(())
+}
+
+pub fn write_record_pair_parallel(
+    out1: &str,
+    out2: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+    records1: &[SeqRecord],
+    records2: &[SeqRecord],
+) -> Result<()> {
+    if can_parallel_write(out1, out2) {
+        let (left, right) = rayon::join(
+            || write_records(out1, format, compression, records1),
+            || write_records(out2, format, compression, records2),
+        );
+        left?;
+        right?;
+        Ok(())
+    } else {
+        write_records(out1, format, compression, records1)?;
+        write_records(out2, format, compression, records2)
+    }
+}
+
+fn can_parallel_write(out1: &str, out2: &str) -> bool {
+    out1 != "-" && out2 != "-" && out1 != out2
 }
 
 pub fn for_each_record(

@@ -226,8 +226,14 @@ fn run_paired_map(args: &RmdupArgs, in1: &str, in2: &str, out2: &str) -> Result<
         o1.push(a);
         o2.push(b);
     }
-    io::write_records(&args.io.output, SeqFormat::Fastq, &args.io.compression, &o1)?;
-    io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &o2)
+    io::write_record_pair_parallel(
+        &args.io.output,
+        out2,
+        SeqFormat::Fastq,
+        &args.io.compression,
+        &o1,
+        &o2,
+    )
 }
 
 #[derive(Hash, PartialEq, Eq)]

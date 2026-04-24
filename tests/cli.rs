@@ -3,6 +3,7 @@ use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use rust_htslib::bam;
 use std::fs;
+use std::io::Write;
 use std::process::Command as ProcessCommand;
 use tempfile::tempdir;
 
@@ -300,6 +301,37 @@ fn stats_auto_detects_format_from_stdin_content() {
         .assert()
         .success()
         .stdout(contains("fastq"));
+}
+
+#[test]
+fn stats_rejects_fastq_quality_length_mismatch() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin("@r1\nACGT\n+\n!!!\n")
+        .assert()
+        .failure()
+        .stderr(contains("quality length"));
+}
+
+#[test]
+fn stats_reads_concatenated_xz_streams() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("concat.fa.xz");
+    let mut data = Vec::new();
+    for chunk in [b">r1\nACGT\n".as_slice(), b">r2\nTGCA\n".as_slice()] {
+        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(chunk).unwrap();
+        data.extend(encoder.finish().unwrap());
+    }
+    fs::write(&input, data).unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfasta\tDNA\t2\t8\t4\t4"));
 }
 
 #[test]
