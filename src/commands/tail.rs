@@ -1,9 +1,12 @@
 use anyhow::{bail, Context, Result};
 use bio::io::{fasta, fastq};
 use std::collections::VecDeque;
-use std::io::{BufReader, BufWriter};
 
 use crate::{cli::TailArgs, formats::SeqFormat, io, utils};
+
+type FastaParts = (String, Option<String>, Vec<u8>);
+type FastqParts = (String, Option<String>, Vec<u8>, Vec<u8>);
+type PairParts = (FastqParts, FastqParts);
 
 pub fn run(args: TailArgs) -> Result<()> {
     let _ = resolve_take(args.num, args.proportion)?;
@@ -43,30 +46,30 @@ fn resolve_take(
 }
 
 fn run_single_tail_streaming(args: &TailArgs, in_path: Option<&str>) -> Result<()> {
-    let keep = resolve_keep_count_single(args, in_path)?;
+    let mode = TailMode::from_args(args)?;
     let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut bw = BufWriter::new(w);
+    let mut bw = io::buffered_writer(w);
 
     match fmt {
         SeqFormat::Fasta => {
             let fa = fasta::Reader::new(br);
-            let mut ring: VecDeque<(String, Option<String>, Vec<u8>)> =
-                VecDeque::with_capacity(keep);
+            let mut ring: VecDeque<FastaParts> = VecDeque::with_capacity(mode.initial_capacity());
+            let mut seen = 0usize;
             for rec in fa.records() {
                 let rec = rec?;
-                if keep == 0 {
-                    continue;
-                }
-                if ring.len() == keep {
-                    ring.pop_front();
-                }
-                ring.push_back((
-                    rec.id().to_string(),
-                    rec.desc().map(|d| d.to_string()),
-                    rec.seq().to_vec(),
-                ));
+                seen += 1;
+                push_tail(
+                    &mut ring,
+                    mode,
+                    seen,
+                    (
+                        rec.id().to_string(),
+                        rec.desc().map(|d| d.to_string()),
+                        rec.seq().to_vec(),
+                    ),
+                );
             }
             let mut out = fasta::Writer::new(&mut bw);
             for (id, desc, seq) in ring {
@@ -75,22 +78,22 @@ fn run_single_tail_streaming(args: &TailArgs, in_path: Option<&str>) -> Result<(
         }
         SeqFormat::Fastq => {
             let fq = fastq::Reader::new(br);
-            let mut ring: VecDeque<(String, Option<String>, Vec<u8>, Vec<u8>)> =
-                VecDeque::with_capacity(keep);
+            let mut ring: VecDeque<FastqParts> = VecDeque::with_capacity(mode.initial_capacity());
+            let mut seen = 0usize;
             for rec in fq.records() {
                 let rec = rec?;
-                if keep == 0 {
-                    continue;
-                }
-                if ring.len() == keep {
-                    ring.pop_front();
-                }
-                ring.push_back((
-                    rec.id().to_string(),
-                    rec.desc().map(|d| d.to_string()),
-                    rec.seq().to_vec(),
-                    rec.qual().to_vec(),
-                ));
+                seen += 1;
+                push_tail(
+                    &mut ring,
+                    mode,
+                    seen,
+                    (
+                        rec.id().to_string(),
+                        rec.desc().map(|d| d.to_string()),
+                        rec.seq().to_vec(),
+                        rec.qual().to_vec(),
+                    ),
+                );
             }
             let mut out = fastq::Writer::new(&mut bw);
             for (id, desc, seq, qual) in ring {
@@ -102,61 +105,19 @@ fn run_single_tail_streaming(args: &TailArgs, in_path: Option<&str>) -> Result<(
     Ok(())
 }
 
-fn resolve_keep_count_single(args: &TailArgs, in_path: Option<&str>) -> Result<usize> {
-    match (args.num, args.proportion) {
-        (Some(n), None) => Ok(n),
-        (None, Some(p)) => {
-            if in_path == Some("-") {
-                // stdin cannot be rewound; fallback to materialize
-                let (_fmt, recs) =
-                    io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
-                return Ok(((recs.len() as f64) * p).ceil() as usize);
-            }
-            let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
-            let total = count_records(fmt, br)?;
-            Ok(((total as f64) * p).ceil() as usize)
-        }
-        _ => unreachable!(),
-    }
-}
-
-fn count_records(fmt: SeqFormat, br: BufReader<Box<dyn std::io::Read>>) -> Result<usize> {
-    let mut total = 0usize;
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for rec in fa.records() {
-                rec?;
-                total += 1;
-            }
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for rec in fq.records() {
-                rec?;
-                total += 1;
-            }
-        }
-        _ => bail!("tail currently supports FASTA/FASTQ input"),
-    }
-    Ok(total)
-}
-
 fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) -> Result<()> {
-    let keep = resolve_keep_count_paired(args, in1, in2)?;
+    let mode = TailMode::from_args(args)?;
     let r1 = io::open_reader(Some(in1))?;
     let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
     let r2 = io::open_reader(Some(in2))?;
     let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(BufReader::new(r1));
-    let fq2 = fastq::Reader::new(BufReader::new(r2));
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
     let mut it1 = fq1.records();
     let mut it2 = fq2.records();
 
-    let mut ring: VecDeque<(
-        (String, Option<String>, Vec<u8>, Vec<u8>),
-        (String, Option<String>, Vec<u8>, Vec<u8>),
-    )> = VecDeque::with_capacity(keep);
+    let mut ring: VecDeque<PairParts> = VecDeque::with_capacity(mode.initial_capacity());
+    let mut valid_seen = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
     loop {
@@ -171,26 +132,26 @@ fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) 
                     }
                     continue;
                 }
-                if keep == 0 {
-                    continue;
-                }
-                if ring.len() == keep {
-                    ring.pop_front();
-                }
-                ring.push_back((
+                valid_seen += 1;
+                push_tail(
+                    &mut ring,
+                    mode,
+                    valid_seen,
                     (
-                        a.id().to_string(),
-                        a.desc().map(|d| d.to_string()),
-                        a.seq().to_vec(),
-                        a.qual().to_vec(),
+                        (
+                            a.id().to_string(),
+                            a.desc().map(|d| d.to_string()),
+                            a.seq().to_vec(),
+                            a.qual().to_vec(),
+                        ),
+                        (
+                            b.id().to_string(),
+                            b.desc().map(|d| d.to_string()),
+                            b.seq().to_vec(),
+                            b.qual().to_vec(),
+                        ),
                     ),
-                    (
-                        b.id().to_string(),
-                        b.desc().map(|d| d.to_string()),
-                        b.seq().to_vec(),
-                        b.qual().to_vec(),
-                    ),
-                ));
+                );
             }
             (Some(a), None) => {
                 invalid_count += 1;
@@ -213,8 +174,8 @@ fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) 
     let w1 = io::wrap_compress(w1, &args.io.output, &args.io.compression)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress(w2, out2, &args.io.compression)?;
-    let mut w1 = fastq::Writer::new(BufWriter::new(w1));
-    let mut w2 = fastq::Writer::new(BufWriter::new(w2));
+    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
+    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
     for ((id1, desc1, seq1, q1), (id2, desc2, seq2, q2)) in ring {
         w1.write(&id1, desc1.as_deref(), &seq1, &q1)?;
         w2.write(&id2, desc2.as_deref(), &seq2, &q2)?;
@@ -222,42 +183,51 @@ fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) 
     Ok(())
 }
 
-fn resolve_keep_count_paired(args: &TailArgs, in1: &str, in2: &str) -> Result<usize> {
-    match (args.num, args.proportion) {
-        (Some(n), None) => Ok(n),
-        (None, Some(p)) => {
-            let r1 = io::open_reader(Some(in1))?;
-            let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-            let r2 = io::open_reader(Some(in2))?;
-            let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-            let fq1 = fastq::Reader::new(BufReader::new(r1));
-            let fq2 = fastq::Reader::new(BufReader::new(r2));
-            let mut it1 = fq1.records();
-            let mut it2 = fq2.records();
-            let mut valid = 0usize;
-            loop {
-                let a = it1.next().transpose()?;
-                let b = it2.next().transpose()?;
-                match (a, b) {
-                    (Some(a), Some(b)) => {
-                        if pair_key(a.id()) == pair_key(b.id()) {
-                            valid += 1;
-                        }
-                    }
-                    (None, None) => break,
-                    _ => {}
-                }
-            }
-            Ok(((valid as f64) * p).ceil() as usize)
-        }
-        _ => unreachable!(),
-    }
-}
-
 fn pair_key(id: &str) -> &str {
     id.strip_suffix("/1")
         .or_else(|| id.strip_suffix("/2"))
         .unwrap_or(id)
+}
+
+#[derive(Clone, Copy)]
+enum TailMode {
+    Fixed(usize),
+    Proportion(f64),
+}
+
+impl TailMode {
+    fn from_args(args: &TailArgs) -> Result<Self> {
+        match (args.num, args.proportion) {
+            (Some(n), None) => Ok(Self::Fixed(n)),
+            (None, Some(p)) => Ok(Self::Proportion(p)),
+            _ => unreachable!("tail arguments are validated before streaming"),
+        }
+    }
+
+    fn initial_capacity(self) -> usize {
+        match self {
+            Self::Fixed(n) => n,
+            Self::Proportion(_) => 0,
+        }
+    }
+
+    fn keep_after_seen(self, seen: usize) -> usize {
+        match self {
+            Self::Fixed(n) => n,
+            Self::Proportion(p) => ((seen as f64) * p).ceil() as usize,
+        }
+    }
+}
+
+fn push_tail<T>(ring: &mut VecDeque<T>, mode: TailMode, seen: usize, item: T) {
+    let keep = mode.keep_after_seen(seen);
+    if keep == 0 {
+        return;
+    }
+    while ring.len() >= keep {
+        ring.pop_front();
+    }
+    ring.push_back(item);
 }
 
 fn report_invalid_pairs(

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader, BufWriter},
+    io::{BufRead, BufReader},
 };
 
 use anyhow::{bail, Context, Result};
@@ -51,10 +51,12 @@ pub fn run(args: RenameArgs) -> Result<()> {
             in1,
             in2,
             out2,
-            mode,
-            mapping.as_ref(),
-            regex.as_ref(),
-            replacement,
+            RenamePlan {
+                mode,
+                mapping: mapping.as_ref(),
+                regex: regex.as_ref(),
+                replacement,
+            },
         );
     }
 
@@ -118,7 +120,7 @@ fn resolve_mode(args: &RenameArgs) -> Result<RenameMode> {
 fn load_mapping(path: &str) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     let file = File::open(path).with_context(|| format!("failed to read mapping file '{path}'"))?;
-    let br = BufReader::new(file);
+    let br = BufReader::with_capacity(io::BUFFER_SIZE, file);
     for (i, raw_line) in br.lines().enumerate() {
         let line_no = i + 1;
         let line_raw = raw_line?;
@@ -190,7 +192,7 @@ fn run_single_streaming(
     match fmt {
         SeqFormat::Fasta => {
             let fa = fasta::Reader::new(br);
-            let mut out = fasta::Writer::new(BufWriter::new(w));
+            let mut out = fasta::Writer::new(io::buffered_writer(w));
             for rec in fa.records() {
                 let rec = rec?;
                 let id = rename_id(args, mode, idx, rec.id(), mapping, regex, replacement)?;
@@ -200,7 +202,7 @@ fn run_single_streaming(
         }
         SeqFormat::Fastq => {
             let fq = fastq::Reader::new(br);
-            let mut out = fastq::Writer::new(BufWriter::new(w));
+            let mut out = fastq::Writer::new(io::buffered_writer(w));
             for rec in fq.records() {
                 let rec = rec?;
                 let id = rename_id(args, mode, idx, rec.id(), mapping, regex, replacement)?;
@@ -218,17 +220,14 @@ fn run_paired_streaming(
     in1: &str,
     in2: &str,
     out2: &str,
-    mode: RenameMode,
-    mapping: Option<&HashMap<String, String>>,
-    regex: Option<&Regex>,
-    replacement: Option<&str>,
+    plan: RenamePlan<'_>,
 ) -> Result<()> {
     let r1 = io::open_reader(Some(in1))?;
     let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
     let r2 = io::open_reader(Some(in2))?;
     let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(BufReader::new(r1));
-    let fq2 = fastq::Reader::new(BufReader::new(r2));
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
     let mut it1 = fq1.records();
     let mut it2 = fq2.records();
 
@@ -236,8 +235,8 @@ fn run_paired_streaming(
     let w1 = io::wrap_compress(w1, &args.io.output, &args.io.compression)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress(w2, out2, &args.io.compression)?;
-    let mut w1 = fastq::Writer::new(BufWriter::new(w1));
-    let mut w2 = fastq::Writer::new(BufWriter::new(w2));
+    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
+    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
 
     let mut idx = 0usize;
     let mut invalid_preview = Vec::new();
@@ -254,7 +253,15 @@ fn run_paired_streaming(
                     }
                     continue;
                 }
-                let core = rename_id(args, mode, idx, a.id(), mapping, regex, replacement)?;
+                let core = rename_id(
+                    args,
+                    plan.mode,
+                    idx,
+                    a.id(),
+                    plan.mapping,
+                    plan.regex,
+                    plan.replacement,
+                )?;
                 let (id1, id2) = if args.keep_pair_suffix {
                     (format!("{core}/1"), format!("{core}/2"))
                 } else {
@@ -280,6 +287,13 @@ fn run_paired_streaming(
         }
     }
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)
+}
+
+struct RenamePlan<'a> {
+    mode: RenameMode,
+    mapping: Option<&'a HashMap<String, String>>,
+    regex: Option<&'a Regex>,
+    replacement: Option<&'a str>,
 }
 
 fn pair_key(id: &str) -> &str {

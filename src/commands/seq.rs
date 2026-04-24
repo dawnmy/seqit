@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 
 use anyhow::{bail, Result};
 use bio::io::{fasta, fastq};
@@ -20,7 +20,7 @@ pub fn run(args: SeqArgs) -> Result<()> {
 
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut bw = BufWriter::new(w);
+    let mut bw = io::buffered_writer(w);
 
     let gap_letters = args
         .remove_gaps
@@ -129,7 +129,7 @@ fn process_record(
     }
 
     if args.revcomp {
-        rec.seq = crate::utils::revcomp(&rec.seq);
+        crate::utils::reverse_complement_in_place(&mut rec.seq);
         if let Some(q) = &mut rec.qual {
             q.reverse();
         }
@@ -141,7 +141,7 @@ fn process_record(
             }
         }
         if args.comp {
-            rec.seq = crate::utils::revcomp(&rec.seq).into_iter().rev().collect();
+            crate::utils::complement_in_place(&mut rec.seq);
         }
     }
     if args.upper {
@@ -169,51 +169,67 @@ fn write_record(
     rec: &crate::formats::SeqRecord,
 ) -> Result<()> {
     if args.seq {
-        write_line(bw, &render_seq(&rec.seq, args.color))?;
+        write_seq_line(bw, &rec.seq, args.color)?;
         return Ok(());
     }
     if args.only_id {
-        write_line(bw, &rec.id)?;
+        write_line_bytes(bw, rec.id.as_bytes())?;
         return Ok(());
     }
     if args.name {
         if args.full_name {
-            write_line(bw, &rec.name())?;
+            write_full_name_line(bw, rec)?;
         } else {
-            write_line(bw, &rec.id)?;
+            write_line_bytes(bw, rec.id.as_bytes())?;
         }
         return Ok(());
     }
 
     match fmt {
         SeqFormat::Fasta => {
-            write_line(bw, &format!(">{}", rec.name()))?;
-            write_line(bw, &render_seq(&rec.seq, args.color))?;
+            bw.write_all(b">")?;
+            write_full_name_line(bw, rec)?;
+            write_seq_line(bw, &rec.seq, args.color)?;
         }
         SeqFormat::Fastq => {
-            write_line(bw, &format!("@{}", rec.name()))?;
-            write_line(bw, &render_seq(&rec.seq, args.color))?;
-            write_line(bw, "+")?;
+            bw.write_all(b"@")?;
+            write_full_name_line(bw, rec)?;
+            write_seq_line(bw, &rec.seq, args.color)?;
+            bw.write_all(b"+\n")?;
             let Some(q) = &rec.qual else {
                 bail!("record '{}' missing qualities for FASTQ output", rec.id);
             };
-            write_line(bw, &String::from_utf8_lossy(q))?;
+            write_line_bytes(bw, q)?;
         }
         _ => bail!("format {:?} not yet implemented for seq output", fmt),
     }
     Ok(())
 }
 
-fn write_line(writer: &mut impl Write, line: &str) -> Result<()> {
-    writer.write_all(line.as_bytes())?;
+fn write_line_bytes(writer: &mut impl Write, line: &[u8]) -> Result<()> {
+    writer.write_all(line)?;
     writer.write_all(b"\n")?;
     Ok(())
 }
 
-fn render_seq(seq: &[u8], color: bool) -> String {
-    if !color {
-        return String::from_utf8_lossy(seq).into_owned();
+fn write_full_name_line(writer: &mut impl Write, rec: &crate::formats::SeqRecord) -> Result<()> {
+    writer.write_all(rec.id.as_bytes())?;
+    if let Some(desc) = &rec.desc {
+        writer.write_all(b" ")?;
+        writer.write_all(desc.as_bytes())?;
     }
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_seq_line(writer: &mut impl Write, seq: &[u8], color: bool) -> Result<()> {
+    if !color {
+        return write_line_bytes(writer, seq);
+    }
+    write_line_bytes(writer, render_colored_seq(seq).as_bytes())
+}
+
+fn render_colored_seq(seq: &[u8]) -> String {
     let mut out = String::with_capacity(seq.len() * 8);
     for b in seq {
         let c = *b as char;

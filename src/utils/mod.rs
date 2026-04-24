@@ -1,12 +1,4 @@
-use ahash::AHasher;
 use anyhow::{bail, Result};
-use std::hash::{Hash, Hasher};
-
-pub fn hash64<T: Hash>(value: &T) -> u64 {
-    let mut h = AHasher::default();
-    value.hash(&mut h);
-    h.finish()
-}
 
 pub fn parse_mem_bytes(mem: &str) -> usize {
     let m = mem.trim().to_ascii_uppercase();
@@ -22,19 +14,27 @@ pub fn parse_mem_bytes(mem: &str) -> usize {
     m.parse::<usize>().unwrap_or(128 * 1024 * 1024)
 }
 
-pub fn revcomp(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|b| match b.to_ascii_uppercase() {
-            b'A' => b'T',
-            b'C' => b'G',
-            b'G' => b'C',
-            b'T' => b'A',
-            b'U' => b'A',
-            b'N' => b'N',
-            x => x,
-        })
-        .collect()
+pub fn complement_in_place(seq: &mut [u8]) {
+    for b in seq {
+        *b = complement_base(*b);
+    }
+}
+
+pub fn reverse_complement_in_place(seq: &mut [u8]) {
+    seq.reverse();
+    complement_in_place(seq);
+}
+
+fn complement_base(base: u8) -> u8 {
+    match base.to_ascii_uppercase() {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        b'U' => b'A',
+        b'N' => b'N',
+        _ => base,
+    }
 }
 
 pub fn validate_input_mode(

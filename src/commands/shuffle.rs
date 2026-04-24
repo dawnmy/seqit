@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use std::io::Write;
 
 use crate::{cli::ShuffleArgs, formats::SeqFormat, io, pairs, utils};
 
@@ -17,13 +18,21 @@ pub fn run(args: ShuffleArgs) -> Result<()> {
             .output2
             .as_deref()
             .context("paired shuffle requires --output2")?;
-        let mut idx: Vec<usize> = (0..r1.len()).collect();
+        let mut paired = r1.into_iter().zip(r2).collect::<Vec<_>>();
         use rand::seq::SliceRandom;
-        idx.shuffle(&mut rng);
-        let o1: Vec<_> = idx.iter().map(|i| r1[*i].clone()).collect();
-        let o2: Vec<_> = idx.iter().map(|i| r2[*i].clone()).collect();
-        io::write_records(&args.io.output, SeqFormat::Fastq, &args.io.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &o2)?;
+        paired.shuffle(&mut rng);
+        let w1 = io::open_writer(&args.io.output)?;
+        let w1 = io::wrap_compress(w1, &args.io.output, &args.io.compression)?;
+        let w2 = io::open_writer(out2)?;
+        let w2 = io::wrap_compress(w2, out2, &args.io.compression)?;
+        let mut w1 = io::buffered_writer(w1);
+        let mut w2 = io::buffered_writer(w2);
+        for (a, b) in paired {
+            io::write_record(&mut w1, SeqFormat::Fastq, &a)?;
+            io::write_record(&mut w2, SeqFormat::Fastq, &b)?;
+        }
+        w1.flush()?;
+        w2.flush()?;
         return Ok(());
     }
     let in_path = args.io.input.as_deref();

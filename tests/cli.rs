@@ -538,6 +538,71 @@ fn tail_supports_proportion() {
 }
 
 #[test]
+fn tail_proportion_streams_from_stdin() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["tail", "--format", "fastq", "-p", "0.5"])
+        .write_stdin("@r1\nACGT\n+\nIIII\n@r2\nGGNN\n+\nHHHH\n@r3\nTTAA\n+\nJJJJ\n")
+        .assert()
+        .success()
+        .stdout(contains("@r2"))
+        .stdout(contains("@r3"))
+        .stdout(predicates::str::contains("@r1").not());
+}
+
+#[test]
+fn sort_spills_with_small_memory_limit() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("unsorted.fa");
+    let out = td.path().join("sorted.fa");
+    fs::write(&input, ">r3\nTTAA\n>r1\nACGT\n>r2\nGGNN\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sort",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--mem",
+            "1",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, ">r1\nACGT\n>r2\nGGNN\n>r3\nTTAA\n");
+}
+
+#[test]
+fn rmdup_keep_first_streams_unique_ids() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("dup.fa");
+    let out = td.path().join("dedup.fa");
+    fs::write(&input, ">r1\nACGT\n>r2\nGGNN\n>r1\nTTAA\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rmdup",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--by",
+            "id",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, ">r1\nACGT\n>r2\nGGNN\n");
+}
+
+#[test]
 fn paired_validation_reports_and_allows_override() {
     let td = tempdir().unwrap();
     let bad_r2 = td.path().join("bad2.fq");

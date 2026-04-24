@@ -7,6 +7,8 @@ use bio::io::{fasta, fastq};
 use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
+pub const BUFFER_SIZE: usize = 1024 * 1024;
+
 pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
     let reader: Box<dyn Read> = match path {
         None | Some("-") => Box::new(io::stdin()),
@@ -22,6 +24,14 @@ pub fn open_writer(path: &str) -> Result<Box<dyn Write>> {
         Box::new(File::create(path).with_context(|| format!("failed to create output '{path}'"))?)
     };
     Ok(writer)
+}
+
+pub fn buffered_reader(reader: Box<dyn Read>) -> BufReader<Box<dyn Read>> {
+    BufReader::with_capacity(BUFFER_SIZE, reader)
+}
+
+pub fn buffered_writer(writer: Box<dyn Write>) -> BufWriter<Box<dyn Write>> {
+    BufWriter::with_capacity(BUFFER_SIZE, writer)
 }
 
 pub fn wrap_decompress(
@@ -74,7 +84,7 @@ pub fn read_records(
 ) -> Result<Vec<SeqRecord>> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let br = BufReader::new(r);
+    let br = buffered_reader(r);
     match format {
         SeqFormat::Fasta => read_fasta(br),
         SeqFormat::Fastq => read_fastq(br),
@@ -90,7 +100,7 @@ pub fn read_records_with_format(
     if matches!(format, FormatArg::Auto) && matches!(path, None | Some("-")) {
         let r = open_reader(path)?;
         let r = wrap_decompress(r, path, compression)?;
-        let mut br = BufReader::new(r);
+        let mut br = buffered_reader(r);
         let fmt = detect_format_from_bufread(&mut br)?;
         let recs = match fmt {
             SeqFormat::Fasta => read_fasta(br)?,
@@ -111,7 +121,7 @@ pub fn open_seq_reader(
 ) -> Result<(SeqFormat, BufReader<Box<dyn Read>>)> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let mut br = BufReader::new(r);
+    let mut br = buffered_reader(r);
 
     let fmt = if let Some(fmt) = SeqFormat::from_arg(format) {
         fmt
@@ -152,7 +162,7 @@ fn detect_format_from_stream(
 ) -> Result<SeqFormat> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let mut br = BufReader::new(r);
+    let mut br = buffered_reader(r);
     detect_format_from_bufread(&mut br)
 }
 
@@ -190,12 +200,84 @@ pub fn write_records(
 ) -> Result<()> {
     let w = open_writer(path)?;
     let w = wrap_compress(w, path, compression)?;
-    let bw = BufWriter::new(w);
+    let mut bw = buffered_writer(w);
+    for rec in records {
+        write_record(&mut bw, format, rec)?;
+    }
+    bw.flush()?;
+    Ok(())
+}
+
+pub fn for_each_record(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+    mut f: impl FnMut(SeqRecord) -> Result<()>,
+) -> Result<SeqFormat> {
+    let (fmt, br) = open_seq_reader(path, format, compression)?;
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for r in fa.records() {
+                let r = r?;
+                f(SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: None,
+                })?;
+            }
+        }
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for r in fq.records() {
+                let r = r?;
+                f(SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: Some(r.qual().to_vec()),
+                })?;
+            }
+        }
+        _ => bail!("format {:?} not yet implemented for this command", fmt),
+    }
+    Ok(fmt)
+}
+
+pub fn write_record(writer: &mut impl Write, format: SeqFormat, rec: &SeqRecord) -> Result<()> {
     match format {
-        SeqFormat::Fasta => write_fasta(bw, records),
-        SeqFormat::Fastq => write_fastq(bw, records),
+        SeqFormat::Fasta => {
+            writer.write_all(b">")?;
+            write_header(writer, rec)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n")?;
+        }
+        SeqFormat::Fastq => {
+            let Some(q) = &rec.qual else {
+                bail!("record '{}' missing qualities for FASTQ output", rec.id);
+            };
+            writer.write_all(b"@")?;
+            write_header(writer, rec)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n+\n")?;
+            writer.write_all(q)?;
+            writer.write_all(b"\n")?;
+        }
         _ => bail!("format {:?} not yet implemented for this command", format),
     }
+    Ok(())
+}
+
+fn write_header(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
+    writer.write_all(rec.id.as_bytes())?;
+    if let Some(desc) = &rec.desc {
+        writer.write_all(b" ")?;
+        writer.write_all(desc.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn read_fasta(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
@@ -226,23 +308,4 @@ fn read_fastq(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
         });
     }
     Ok(out)
-}
-
-fn write_fasta(writer: impl Write, records: &[SeqRecord]) -> Result<()> {
-    let mut w = fasta::Writer::new(writer);
-    for r in records {
-        w.write(&r.id, r.desc.as_deref(), &r.seq)?;
-    }
-    Ok(())
-}
-
-fn write_fastq(writer: impl Write, records: &[SeqRecord]) -> Result<()> {
-    let mut w = fastq::Writer::new(writer);
-    for r in records {
-        let Some(q) = &r.qual else {
-            bail!("record '{}' missing qualities for FASTQ output", r.id);
-        };
-        w.write(&r.id, r.desc.as_deref(), &r.seq, q)?;
-    }
-    Ok(())
 }

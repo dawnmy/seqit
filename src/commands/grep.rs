@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, Write},
 };
 
 use anyhow::{bail, Context, Result};
@@ -52,8 +52,8 @@ pub fn run(args: GrepArgs) -> Result<()> {
         let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
         let r2 = io::open_reader(Some(in2))?;
         let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-        let fq1 = fastq::Reader::new(BufReader::new(r1));
-        let fq2 = fastq::Reader::new(BufReader::new(r2));
+        let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+        let fq2 = fastq::Reader::new(io::buffered_reader(r2));
         let mut it1 = fq1.records();
         let mut it2 = fq2.records();
 
@@ -64,8 +64,8 @@ pub fn run(args: GrepArgs) -> Result<()> {
             let o1 = io::wrap_compress(o1, &args.io.output, &args.io.compression)?;
             let o2 = io::open_writer(out2)?;
             let o2 = io::wrap_compress(o2, out2, &args.io.compression)?;
-            w1 = Some(fastq::Writer::new(BufWriter::new(o1)));
-            w2 = Some(fastq::Writer::new(BufWriter::new(o2)));
+            w1 = Some(fastq::Writer::new(io::buffered_writer(o1)));
+            w2 = Some(fastq::Writer::new(io::buffered_writer(o2)));
         }
         let mut count = 0usize;
         let mut invalid_preview = Vec::new();
@@ -165,7 +165,7 @@ pub fn run(args: GrepArgs) -> Result<()> {
     if !args.count && !args.only_names {
         let out = io::open_writer(&args.io.output)?;
         let out = io::wrap_compress(out, &args.io.output, &args.io.compression)?;
-        writer = Some(BufWriter::new(out));
+        writer = Some(io::buffered_writer(out));
     }
     match fmt {
         SeqFormat::Fasta => {
@@ -239,7 +239,7 @@ fn load_patterns(args: &GrepArgs) -> Result<Vec<String>> {
     }
     if let Some(file) = &args.pattern_file {
         let f = File::open(file)?;
-        let br = BufReader::new(f);
+        let br = BufReader::with_capacity(io::BUFFER_SIZE, f);
         let patterns = br
             .lines()
             .map(|line| line.map(|l| l.trim().to_string()))
@@ -350,12 +350,15 @@ fn is_match_fields(
 }
 
 fn write_fasta_record(w: &mut impl Write, id: &str, desc: Option<&str>, seq: &[u8]) -> Result<()> {
+    w.write_all(b">")?;
+    w.write_all(id.as_bytes())?;
     if let Some(desc) = desc {
-        writeln!(w, ">{id} {desc}")?;
-    } else {
-        writeln!(w, ">{id}")?;
+        w.write_all(b" ")?;
+        w.write_all(desc.as_bytes())?;
     }
-    writeln!(w, "{}", String::from_utf8_lossy(seq))?;
+    w.write_all(b"\n")?;
+    w.write_all(seq)?;
+    w.write_all(b"\n")?;
     Ok(())
 }
 
@@ -366,14 +369,17 @@ fn write_fastq_record(
     seq: &[u8],
     qual: &[u8],
 ) -> Result<()> {
+    w.write_all(b"@")?;
+    w.write_all(id.as_bytes())?;
     if let Some(desc) = desc {
-        writeln!(w, "@{id} {desc}")?;
-    } else {
-        writeln!(w, "@{id}")?;
+        w.write_all(b" ")?;
+        w.write_all(desc.as_bytes())?;
     }
-    writeln!(w, "{}", String::from_utf8_lossy(seq))?;
-    writeln!(w, "+")?;
-    writeln!(w, "{}", String::from_utf8_lossy(qual))?;
+    w.write_all(b"\n")?;
+    w.write_all(seq)?;
+    w.write_all(b"\n+\n")?;
+    w.write_all(qual)?;
+    w.write_all(b"\n")?;
     Ok(())
 }
 
