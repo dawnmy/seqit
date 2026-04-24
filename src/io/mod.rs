@@ -8,6 +8,7 @@ use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
 pub const BUFFER_SIZE: usize = 1024 * 1024;
+const PARALLEL_GZIP_LEVEL: u32 = 3;
 
 pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
     let reader: Box<dyn Read> = match path {
@@ -17,8 +18,11 @@ pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
     Ok(reader)
 }
 
-pub fn open_writer(path: &str) -> Result<Box<dyn Write>> {
-    let writer: Box<dyn Write> = if path == "-" {
+type DynWriter = Box<dyn Write>;
+type DynSendWriter = Box<dyn Write + Send>;
+
+pub fn open_writer(path: &str) -> Result<DynSendWriter> {
+    let writer: DynSendWriter = if path == "-" {
         Box::new(io::stdout())
     } else {
         Box::new(File::create(path).with_context(|| format!("failed to create output '{path}'"))?)
@@ -30,7 +34,7 @@ pub fn buffered_reader(reader: Box<dyn Read>) -> BufReader<Box<dyn Read>> {
     BufReader::with_capacity(BUFFER_SIZE, reader)
 }
 
-pub fn buffered_writer(writer: Box<dyn Write>) -> BufWriter<Box<dyn Write>> {
+pub fn buffered_writer(writer: DynWriter) -> BufWriter<DynWriter> {
     BufWriter::with_capacity(BUFFER_SIZE, writer)
 }
 
@@ -51,17 +55,92 @@ pub fn wrap_decompress(
 }
 
 pub fn wrap_compress(
-    writer: Box<dyn Write>,
+    writer: DynSendWriter,
     path: &str,
     mode: &CompressionArg,
-) -> Result<Box<dyn Write>> {
+) -> Result<DynWriter> {
+    wrap_compress_for_streams(writer, path, mode, 1)
+}
+
+pub fn wrap_compress_for_streams(
+    writer: DynSendWriter,
+    path: &str,
+    mode: &CompressionArg,
+    concurrent_streams: usize,
+) -> Result<DynWriter> {
     match detect_compression(Some(path), mode) {
-        CompressionArg::Gz => Ok(Box::new(flate2::write::GzEncoder::new(
+        CompressionArg::Gz => Ok(wrap_gzip_writer(writer, concurrent_streams)),
+        CompressionArg::Xz => wrap_xz_writer(writer, concurrent_streams),
+        _ => Ok(writer),
+    }
+}
+
+fn wrap_gzip_writer(writer: DynSendWriter, concurrent_streams: usize) -> DynWriter {
+    let threads = compression_threads_for_streams(concurrent_streams);
+    if threads <= 1 {
+        return Box::new(flate2::write::GzEncoder::new(
             writer,
             flate2::Compression::default(),
-        ))),
-        CompressionArg::Xz => Ok(Box::new(xz2::write::XzEncoder::new(writer, 6))),
-        _ => Ok(writer),
+        ));
+    }
+    Box::new(ParallelGzipWriter::new(writer, threads))
+}
+
+fn compression_threads_for_streams(concurrent_streams: usize) -> usize {
+    let streams = concurrent_streams.max(1);
+    (rayon::current_num_threads() / streams).max(1)
+}
+
+fn wrap_xz_writer(writer: DynSendWriter, concurrent_streams: usize) -> Result<DynWriter> {
+    let threads = compression_threads_for_streams(concurrent_streams);
+    if threads <= 1 {
+        return Ok(Box::new(xz2::write::XzEncoder::new(writer, 6)));
+    }
+
+    let mut builder = xz2::stream::MtStreamBuilder::new();
+    builder
+        .threads(threads.min(u32::MAX as usize) as u32)
+        .preset(6);
+    let stream = builder.encoder()?;
+    Ok(Box::new(xz2::write::XzEncoder::new_stream(writer, stream)))
+}
+
+struct ParallelGzipWriter {
+    inner: Option<Box<dyn gzp::ZWriter<DynSendWriter>>>,
+}
+
+impl ParallelGzipWriter {
+    fn new(writer: DynSendWriter, threads: usize) -> Self {
+        let inner = gzp::ZBuilder::<gzp::deflate::Gzip, _>::new()
+            .num_threads(threads)
+            .compression_level(flate2::Compression::new(PARALLEL_GZIP_LEVEL))
+            .buffer_size(gzp::BUFSIZE)
+            .from_writer(writer);
+        Self { inner: Some(inner) }
+    }
+}
+
+impl Write for ParallelGzipWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner
+            .as_mut()
+            .expect("gzip writer used after finish")
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .expect("gzip writer used after finish")
+            .flush()
+    }
+}
+
+impl Drop for ParallelGzipWriter {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            let _ = inner.finish();
+        }
     }
 }
 
@@ -225,8 +304,18 @@ pub fn write_records(
     compression: &CompressionArg,
     records: &[SeqRecord],
 ) -> Result<()> {
+    write_records_for_streams(path, format, compression, records, 1)
+}
+
+fn write_records_for_streams(
+    path: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+    records: &[SeqRecord],
+    concurrent_streams: usize,
+) -> Result<()> {
     let w = open_writer(path)?;
-    let w = wrap_compress(w, path, compression)?;
+    let w = wrap_compress_for_streams(w, path, compression, concurrent_streams)?;
     let mut bw = buffered_writer(w);
     for rec in records {
         write_record(&mut bw, format, rec)?;
@@ -245,8 +334,8 @@ pub fn write_record_pair_parallel(
 ) -> Result<()> {
     if can_parallel_write(out1, out2) {
         let (left, right) = rayon::join(
-            || write_records(out1, format, compression, records1),
-            || write_records(out2, format, compression, records2),
+            || write_records_for_streams(out1, format, compression, records1, 2),
+            || write_records_for_streams(out2, format, compression, records2, 2),
         );
         left?;
         right?;

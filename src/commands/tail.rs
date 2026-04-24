@@ -171,9 +171,9 @@ fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) 
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
 
     let w1 = io::open_writer(&args.io.output)?;
-    let w1 = io::wrap_compress(w1, &args.io.output, &args.io.compression)?;
+    let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
-    let w2 = io::wrap_compress(w2, out2, &args.io.compression)?;
+    let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
     let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
     let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
     for ((id1, desc1, seq1, q1), (id2, desc2, seq2, q2)) in ring {

@@ -61,6 +61,58 @@ fn seq_auto_detects_format_from_stdin_content() {
 }
 
 #[test]
+fn seq_writes_readable_parallel_gzip_output() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("out.fq.gz");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            "tests/data/a.fq",
+            "-o",
+            out.to_str().unwrap(),
+            "-t",
+            "2",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", out.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfastq\tDNA\t3\t12\t4\t4"));
+}
+
+#[test]
+fn seq_writes_readable_multithreaded_xz_output() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("out.fq.xz");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            "tests/data/a.fq",
+            "-o",
+            out.to_str().unwrap(),
+            "-t",
+            "2",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", out.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfastq\tDNA\t3\t12\t4\t4"));
+}
+
+#[test]
 fn paired_shuffle_is_deterministic() {
     let td = tempdir().unwrap();
     let o1 = td.path().join("o1.fq");

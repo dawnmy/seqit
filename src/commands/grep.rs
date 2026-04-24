@@ -61,9 +61,9 @@ pub fn run(args: GrepArgs) -> Result<()> {
         let mut w2 = None;
         if !args.count && !args.only_names {
             let o1 = io::open_writer(&args.io.output)?;
-            let o1 = io::wrap_compress(o1, &args.io.output, &args.io.compression)?;
+            let o1 = io::wrap_compress_for_streams(o1, &args.io.output, &args.io.compression, 2)?;
             let o2 = io::open_writer(out2)?;
-            let o2 = io::wrap_compress(o2, out2, &args.io.compression)?;
+            let o2 = io::wrap_compress_for_streams(o2, out2, &args.io.compression, 2)?;
             w1 = Some(fastq::Writer::new(io::buffered_writer(o1)));
             w2 = Some(fastq::Writer::new(io::buffered_writer(o2)));
         }
