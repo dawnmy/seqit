@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
 };
 
 use anyhow::{bail, Result};
@@ -36,6 +36,9 @@ pub fn run(args: LocateArgs) -> Result<()> {
     };
     let in_path = args.io.input.as_deref();
     let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
+    let out = io::open_writer(&args.io.output)?;
+    let out = io::wrap_compress(out, &args.io.output, &args.io.compression)?;
+    let mut out = io::buffered_writer(out);
     match fmt {
         crate::formats::SeqFormat::Fasta => {
             let fa = fasta::Reader::new(br);
@@ -48,7 +51,8 @@ pub fn run(args: LocateArgs) -> Result<()> {
                     regexes.as_deref(),
                     normalized_pats.as_deref(),
                     &args,
-                );
+                    &mut out,
+                )?;
             }
         }
         crate::formats::SeqFormat::Fastq => {
@@ -62,11 +66,13 @@ pub fn run(args: LocateArgs) -> Result<()> {
                     regexes.as_deref(),
                     normalized_pats.as_deref(),
                     &args,
-                );
+                    &mut out,
+                )?;
             }
         }
         _ => bail!("locate currently supports FASTA/FASTQ input"),
     }
+    out.flush()?;
     Ok(())
 }
 
@@ -77,13 +83,20 @@ fn locate_in_record(
     regexes: Option<&[Regex]>,
     normalized_pats: Option<&[String]>,
     args: &LocateArgs,
-) {
-    let text = String::from_utf8_lossy(seq).to_string();
+    out: &mut impl Write,
+) -> Result<()> {
+    let text = String::from_utf8_lossy(seq);
+    let hay_lower = if args.ignore_case && !args.regex {
+        Some(text.to_ascii_lowercase())
+    } else {
+        None
+    };
+    let hay = hay_lower.as_deref().unwrap_or(text.as_ref());
     for (idx, p) in pats.iter().enumerate() {
         if let Some(regexes) = regexes {
             let re = &regexes[idx];
-            for m in re.find_iter(&text) {
-                emit(args.bed, id, m.start(), m.end(), m.as_str());
+            for m in re.find_iter(text.as_ref()) {
+                emit(out, args.bed, id, m.start(), m.end(), m.as_str())?;
                 if !args.all {
                     break;
                 }
@@ -95,30 +108,27 @@ fn locate_in_record(
         } else {
             p.as_str()
         };
-        let hay = if args.ignore_case {
-            text.to_ascii_lowercase()
-        } else {
-            text.clone()
-        };
         let mut offset = 0usize;
         while let Some(i) = hay[offset..].find(query) {
             let s = offset + i;
             let e = s + query.len();
-            emit(args.bed, id, s, e, &text[s..e]);
+            emit(out, args.bed, id, s, e, &text[s..e])?;
             if !args.all {
                 break;
             }
             offset = s + 1;
         }
     }
+    Ok(())
 }
 
-fn emit(bed: bool, id: &str, s: usize, e: usize, m: &str) {
+fn emit(out: &mut impl Write, bed: bool, id: &str, s: usize, e: usize, m: &str) -> Result<()> {
     if bed {
-        println!("{id}\t{s}\t{e}\t{m}");
+        writeln!(out, "{id}\t{s}\t{e}\t{m}")?;
     } else {
-        println!("{id}\t{}\t{}\t{m}", s + 1, e);
+        writeln!(out, "{id}\t{}\t{}\t{m}", s + 1, e)?;
     }
+    Ok(())
 }
 
 fn load_patterns(args: &LocateArgs) -> Result<Vec<String>> {
@@ -131,7 +141,7 @@ fn load_patterns(args: &LocateArgs) -> Result<Vec<String>> {
     }
     if let Some(file) = &args.pattern_file {
         let f = File::open(file)?;
-        let br = BufReader::new(f);
+        let br = BufReader::with_capacity(io::BUFFER_SIZE, f);
         let patterns = br
             .lines()
             .map(|line| line.map(|l| l.trim().to_string()))

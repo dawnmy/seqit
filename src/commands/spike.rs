@@ -11,10 +11,12 @@ pub fn run(args: SpikeArgs) -> Result<()> {
     utils::validate_input_mode("spike", single_input, paired_in1, paired_in2)?;
 
     if let (Some(in1), Some(in2), Some(add2)) = (paired_in1, paired_in2, args.add2.as_deref()) {
-        let t1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.compression)?;
-        let t2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.compression)?;
-        let a1 = io::read_records(Some(&args.add), SeqFormat::Fastq, &args.compression)?;
-        let a2 = io::read_records(Some(add2), SeqFormat::Fastq, &args.compression)?;
+        let (target_pair, add_pair) = rayon::join(
+            || io::read_record_pair_parallel(in1, in2, SeqFormat::Fastq, &args.compression),
+            || io::read_record_pair_parallel(&args.add, add2, SeqFormat::Fastq, &args.compression),
+        );
+        let (t1, t2) = target_pair?;
+        let (a1, a2) = add_pair?;
         let (t1, t2) = pairs::prepare_paired_records(t1, t2, args.allow_unpaired)?;
         let (a1, a2) = pairs::prepare_paired_records(a1, a2, args.allow_unpaired)?;
         let out2 = args
@@ -22,8 +24,14 @@ pub fn run(args: SpikeArgs) -> Result<()> {
             .as_deref()
             .context("paired spike requires --output2")?;
         let (o1, o2) = spike_pairs(t1, t2, a1, a2, args.seed);
-        io::write_records(&args.output, SeqFormat::Fastq, &args.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.compression, &o2)?;
+        io::write_record_pair_parallel(
+            &args.output,
+            out2,
+            SeqFormat::Fastq,
+            &args.compression,
+            &o1,
+            &o2,
+        )?;
         return Ok(());
     }
 
@@ -39,26 +47,23 @@ pub fn run(args: SpikeArgs) -> Result<()> {
     io::write_records(&args.output, fmt, &args.compression, &out)
 }
 
-fn sample_slots(n_slots: usize, m: usize, seed: u64) -> Vec<usize> {
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    (0..m).map(|_| rng.random_range(0..n_slots)).collect()
-}
-
 fn spike_single(
     target: Vec<crate::formats::SeqRecord>,
     insert: Vec<crate::formats::SeqRecord>,
     seed: u64,
 ) -> Vec<crate::formats::SeqRecord> {
-    let mut buckets = vec![Vec::new(); target.len() + 1];
-    let slots = sample_slots(target.len() + 1, insert.len(), seed);
-    for (ins, slot) in insert.into_iter().zip(slots) {
-        buckets[slot].push(ins);
-    }
-    let mut out = Vec::new();
-    out.append(&mut buckets[0]);
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut inserts = insert
+        .into_iter()
+        .map(|rec| (rng.random_range(0..=target.len()), rec))
+        .collect::<Vec<_>>();
+    inserts.sort_unstable_by_key(|(slot, _)| *slot);
+    let mut inserts = inserts.into_iter().peekable();
+    let mut out = Vec::with_capacity(target.len() + inserts.size_hint().0);
+    drain_insert_slot(&mut inserts, 0, &mut out);
     for (i, t) in target.into_iter().enumerate() {
         out.push(t);
-        out.append(&mut buckets[i + 1]);
+        drain_insert_slot(&mut inserts, i + 1, &mut out);
     }
     out
 }
@@ -73,22 +78,47 @@ fn spike_pairs(
     Vec<crate::formats::SeqRecord>,
     Vec<crate::formats::SeqRecord>,
 ) {
-    let mut b1 = vec![Vec::new(); t1.len() + 1];
-    let mut b2 = vec![Vec::new(); t1.len() + 1];
-    let slots = sample_slots(t1.len() + 1, a1.len(), seed);
-    for ((x1, x2), slot) in a1.into_iter().zip(a2.into_iter()).zip(slots) {
-        b1[slot].push(x1);
-        b2[slot].push(x2);
-    }
-    let mut o1 = Vec::new();
-    let mut o2 = Vec::new();
-    o1.append(&mut b1[0]);
-    o2.append(&mut b2[0]);
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut inserts = a1
+        .into_iter()
+        .zip(a2)
+        .map(|(x1, x2)| (rng.random_range(0..=t1.len()), x1, x2))
+        .collect::<Vec<_>>();
+    inserts.sort_unstable_by_key(|(slot, _, _)| *slot);
+    let mut inserts = inserts.into_iter().peekable();
+    let mut o1 = Vec::with_capacity(t1.len() + inserts.size_hint().0);
+    let mut o2 = Vec::with_capacity(t2.len() + inserts.size_hint().0);
+    drain_pair_insert_slot(&mut inserts, 0, &mut o1, &mut o2);
     for (i, (x1, x2)) in t1.into_iter().zip(t2.into_iter()).enumerate() {
         o1.push(x1);
         o2.push(x2);
-        o1.append(&mut b1[i + 1]);
-        o2.append(&mut b2[i + 1]);
+        drain_pair_insert_slot(&mut inserts, i + 1, &mut o1, &mut o2);
     }
     (o1, o2)
+}
+
+fn drain_insert_slot(
+    inserts: &mut std::iter::Peekable<impl Iterator<Item = (usize, crate::formats::SeqRecord)>>,
+    slot: usize,
+    out: &mut Vec<crate::formats::SeqRecord>,
+) {
+    while inserts.peek().is_some_and(|(s, _)| *s == slot) {
+        let (_, rec) = inserts.next().expect("peeked insert");
+        out.push(rec);
+    }
+}
+
+fn drain_pair_insert_slot(
+    inserts: &mut std::iter::Peekable<
+        impl Iterator<Item = (usize, crate::formats::SeqRecord, crate::formats::SeqRecord)>,
+    >,
+    slot: usize,
+    out1: &mut Vec<crate::formats::SeqRecord>,
+    out2: &mut Vec<crate::formats::SeqRecord>,
+) {
+    while inserts.peek().is_some_and(|(s, _, _)| *s == slot) {
+        let (_, rec1, rec2) = inserts.next().expect("peeked insert");
+        out1.push(rec1);
+        out2.push(rec2);
+    }
 }

@@ -3,6 +3,7 @@ use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use rust_htslib::bam;
 use std::fs;
+use std::io::Write;
 use std::process::Command as ProcessCommand;
 use tempfile::tempdir;
 
@@ -57,6 +58,58 @@ fn seq_auto_detects_format_from_stdin_content() {
         .assert()
         .success()
         .stdout(contains("@r1\nACGT"));
+}
+
+#[test]
+fn seq_writes_readable_parallel_gzip_output() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("out.fq.gz");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            "tests/data/a.fq",
+            "-o",
+            out.to_str().unwrap(),
+            "-t",
+            "2",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", out.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfastq\tDNA\t3\t12\t4\t4"));
+}
+
+#[test]
+fn seq_writes_readable_multithreaded_xz_output() {
+    let td = tempdir().unwrap();
+    let out = td.path().join("out.fq.xz");
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            "tests/data/a.fq",
+            "-o",
+            out.to_str().unwrap(),
+            "-t",
+            "2",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", out.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfastq\tDNA\t3\t12\t4\t4"));
 }
 
 #[test]
@@ -303,6 +356,37 @@ fn stats_auto_detects_format_from_stdin_content() {
 }
 
 #[test]
+fn stats_rejects_fastq_quality_length_mismatch() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "-T"])
+        .write_stdin("@r1\nACGT\n+\n!!!\n")
+        .assert()
+        .failure()
+        .stderr(contains("quality length"));
+}
+
+#[test]
+fn stats_reads_concatenated_xz_streams() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("concat.fa.xz");
+    let mut data = Vec::new();
+    for chunk in [b">r1\nACGT\n".as_slice(), b">r2\nTGCA\n".as_slice()] {
+        let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(chunk).unwrap();
+        data.extend(encoder.finish().unwrap());
+    }
+    fs::write(&input, data).unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfasta\tDNA\t2\t8\t4\t4"));
+}
+
+#[test]
 fn stats_supports_multiple_inputs() {
     Command::cargo_bin("seqit")
         .unwrap()
@@ -535,6 +619,71 @@ fn tail_supports_proportion() {
     let text = fs::read_to_string(out).unwrap();
     assert!(text.contains(">r3"));
     assert!(!text.contains(">r1"));
+}
+
+#[test]
+fn tail_proportion_streams_from_stdin() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["tail", "--format", "fastq", "-p", "0.5"])
+        .write_stdin("@r1\nACGT\n+\nIIII\n@r2\nGGNN\n+\nHHHH\n@r3\nTTAA\n+\nJJJJ\n")
+        .assert()
+        .success()
+        .stdout(contains("@r2"))
+        .stdout(contains("@r3"))
+        .stdout(predicates::str::contains("@r1").not());
+}
+
+#[test]
+fn sort_spills_with_small_memory_limit() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("unsorted.fa");
+    let out = td.path().join("sorted.fa");
+    fs::write(&input, ">r3\nTTAA\n>r1\nACGT\n>r2\nGGNN\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sort",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--mem",
+            "1",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, ">r1\nACGT\n>r2\nGGNN\n>r3\nTTAA\n");
+}
+
+#[test]
+fn rmdup_keep_first_streams_unique_ids() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("dup.fa");
+    let out = td.path().join("dedup.fa");
+    fs::write(&input, ">r1\nACGT\n>r2\nGGNN\n>r1\nTTAA\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "rmdup",
+            input.to_str().unwrap(),
+            "--format",
+            "fasta",
+            "--by",
+            "id",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(out).unwrap();
+    assert_eq!(text, ">r1\nACGT\n>r2\nGGNN\n");
 }
 
 #[test]

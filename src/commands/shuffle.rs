@@ -10,20 +10,25 @@ pub fn run(args: ShuffleArgs) -> Result<()> {
     let paired_in2 = args.input2.as_deref().or(args.in2.as_deref());
     utils::validate_input_mode("shuffle", args.io.input.as_deref(), paired_in1, paired_in2)?;
     if let (Some(in1), Some(in2)) = (paired_in1, paired_in2) {
-        let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
-        let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
+        let (r1, r2) =
+            io::read_record_pair_parallel(in1, in2, SeqFormat::Fastq, &args.io.compression)?;
         let (r1, r2) = pairs::prepare_paired_records(r1, r2, args.allow_unpaired)?;
         let out2 = args
             .output2
             .as_deref()
             .context("paired shuffle requires --output2")?;
-        let mut idx: Vec<usize> = (0..r1.len()).collect();
+        let mut paired = r1.into_iter().zip(r2).collect::<Vec<_>>();
         use rand::seq::SliceRandom;
-        idx.shuffle(&mut rng);
-        let o1: Vec<_> = idx.iter().map(|i| r1[*i].clone()).collect();
-        let o2: Vec<_> = idx.iter().map(|i| r2[*i].clone()).collect();
-        io::write_records(&args.io.output, SeqFormat::Fastq, &args.io.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &o2)?;
+        paired.shuffle(&mut rng);
+        let (o1, o2): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
+        io::write_record_pair_parallel(
+            &args.io.output,
+            out2,
+            SeqFormat::Fastq,
+            &args.io.compression,
+            &o1,
+            &o2,
+        )?;
         return Ok(());
     }
     let in_path = args.io.input.as_deref();

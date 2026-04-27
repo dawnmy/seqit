@@ -14,7 +14,7 @@ pub fn run(args: Fq2faArgs) -> Result<()> {
     let fq = fastq::Reader::new(reader);
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut fa = fasta::Writer::new(w);
+    let mut fa = fasta::Writer::new(io::buffered_writer(w));
     for rec in fq.records() {
         let rec = rec?;
         fa.write(rec.id(), rec.desc(), rec.seq())?;

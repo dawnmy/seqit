@@ -3,7 +3,7 @@ use bio::io::{fasta, fastq};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use std::io::{BufReader, BufWriter};
+use std::io::BufReader;
 
 use crate::{
     cli::SampleArgs,
@@ -33,16 +33,7 @@ pub fn run(args: SampleArgs) -> Result<()> {
             .context("paired sample requires --output2")?;
         if let Some(rate) = args.rate {
             log_info(&args, "sample by rate");
-            let outputted = sample_paired_rate_streaming(
-                in1,
-                in2,
-                &args.io.output,
-                out2,
-                &args.io.compression,
-                rate,
-                &mut rng,
-                args.allow_unpaired,
-            )?;
+            let outputted = sample_paired_rate_streaming(&args, in1, in2, out2, rate, &mut rng)?;
             log_info(&args, &format!("{outputted} read pairs outputted"));
             return Ok(());
         }
@@ -56,8 +47,14 @@ pub fn run(args: SampleArgs) -> Result<()> {
             &mut rng,
             args.allow_unpaired,
         )?;
-        io::write_records(&args.io.output, SeqFormat::Fastq, &args.io.compression, &o1)?;
-        io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &o2)?;
+        io::write_record_pair_parallel(
+            &args.io.output,
+            out2,
+            SeqFormat::Fastq,
+            &args.io.compression,
+            &o1,
+            &o2,
+        )?;
         log_info(
             &args,
             &format!(
@@ -78,16 +75,7 @@ fn run_single_streaming(args: SampleArgs, rng: &mut ChaCha20Rng) -> Result<()> {
 
     if let Some(rate) = args.rate {
         log_info(&args, "sample by rate");
-        return sample_rate_streaming(
-            reader,
-            fmt,
-            rate,
-            &args.io.output,
-            &args.io.compression,
-            rng,
-            &pb,
-            args.io.quiet,
-        );
+        return sample_rate_streaming(&args, reader, fmt, rate, rng, &pb);
     }
 
     log_info(&args, "sample by number");
@@ -133,30 +121,28 @@ fn run_single_streaming(args: SampleArgs, rng: &mut ChaCha20Rng) -> Result<()> {
 }
 
 fn sample_paired_rate_streaming(
+    args: &SampleArgs,
     in1: &str,
     in2: &str,
-    out1: &str,
     out2: &str,
-    compression: &crate::cli::CompressionArg,
     rate: f64,
     rng: &mut ChaCha20Rng,
-    allow_unpaired: bool,
 ) -> Result<usize> {
     let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), compression)?;
+    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
     let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), compression)?;
-    let fq1 = fastq::Reader::new(BufReader::new(r1));
-    let fq2 = fastq::Reader::new(BufReader::new(r2));
+    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
     let mut it1 = fq1.records();
     let mut it2 = fq2.records();
 
-    let w1 = io::open_writer(out1)?;
-    let w1 = io::wrap_compress(w1, out1, compression)?;
+    let w1 = io::open_writer(&args.io.output)?;
+    let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
-    let w2 = io::wrap_compress(w2, out2, compression)?;
-    let mut w1 = fastq::Writer::new(BufWriter::new(w1));
-    let mut w2 = fastq::Writer::new(BufWriter::new(w2));
+    let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
+    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
+    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
 
     let mut outputted = 0usize;
     let mut invalid_preview = Vec::new();
@@ -194,7 +180,7 @@ fn sample_paired_rate_streaming(
             (None, None) => break,
         }
     }
-    report_invalid_pairs(invalid_count, invalid_preview, allow_unpaired)?;
+    report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
     Ok(outputted)
 }
 
@@ -210,8 +196,8 @@ fn sample_paired_num_streaming(
     let r1 = io::wrap_decompress(r1, Some(in1), compression)?;
     let r2 = io::open_reader(Some(in2))?;
     let r2 = io::wrap_decompress(r2, Some(in2), compression)?;
-    let fq1 = fastq::Reader::new(BufReader::new(r1));
-    let fq2 = fastq::Reader::new(BufReader::new(r2));
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
     let mut it1 = fq1.records();
     let mut it2 = fq2.records();
 
@@ -303,17 +289,16 @@ fn pair_key(id: &str) -> &str {
 }
 
 fn sample_rate_streaming(
+    args: &SampleArgs,
     reader: BufReader<Box<dyn std::io::Read>>,
     fmt: SeqFormat,
     rate: f64,
-    output: &str,
-    compression: &crate::cli::CompressionArg,
     rng: &mut ChaCha20Rng,
     pb: &Option<ProgressBar>,
-    quiet: bool,
 ) -> Result<()> {
-    let writer = io::open_writer(output)?;
-    let writer = io::wrap_compress(writer, output, compression)?;
+    let writer = io::open_writer(&args.io.output)?;
+    let writer = io::wrap_compress(writer, &args.io.output, &args.io.compression)?;
+    let writer = io::buffered_writer(writer);
     let mut processed = 0usize;
     let mut outputted = 0usize;
     match fmt {
@@ -346,7 +331,7 @@ fn sample_rate_streaming(
         _ => bail!("sample currently supports FASTA/FASTQ input"),
     }
     finish_progress(pb);
-    if !quiet {
+    if !args.io.quiet {
         eprintln!("[INFO] {processed} sequences processed, {outputted} sequences outputted");
     }
     Ok(())

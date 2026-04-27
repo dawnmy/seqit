@@ -1,4 +1,5 @@
-use anyhow::Result;
+use ahash::AHashMap;
+use anyhow::{bail, Result};
 use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read};
@@ -86,16 +87,108 @@ struct SeqTypeCounts {
     t: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+struct SeqLineMetrics {
+    len: usize,
+    gc: usize,
+    n: usize,
+    alpha: usize,
+    non_nuc_alpha: usize,
+    u: usize,
+    t: usize,
+}
+
+#[derive(Default, Clone)]
+struct LenDist {
+    counts: AHashMap<usize, usize>,
+    records: usize,
+    total_bases: usize,
+}
+
+impl LenDist {
+    fn add(&mut self, len: usize) {
+        *self.counts.entry(len).or_insert(0) += 1;
+        self.records += 1;
+        self.total_bases += len;
+    }
+
+    fn nx_lx(&self, x: f64) -> (usize, usize) {
+        if self.records == 0 || self.total_bases == 0 {
+            return (0, 0);
+        }
+        let mut lengths = self
+            .counts
+            .iter()
+            .map(|(&len, &count)| (len, count))
+            .collect::<Vec<_>>();
+        lengths.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let threshold = (self.total_bases as f64) * (x / 100.0);
+        let mut running_bases = 0usize;
+        let mut running_records = 0usize;
+        for (len, count) in lengths {
+            let next_bases = running_bases + len * count;
+            if (next_bases as f64) >= threshold {
+                let remaining = (threshold - running_bases as f64).max(0.0);
+                let needed = if len == 0 {
+                    0
+                } else {
+                    (remaining / len as f64).ceil() as usize
+                };
+                return (len, running_records + needed.max(1).min(count));
+            }
+            running_bases = next_bases;
+            running_records += count;
+        }
+        (0, 0)
+    }
+
+    fn quartiles(&self) -> (usize, usize, usize) {
+        (
+            self.percentile(25.0),
+            self.percentile(50.0),
+            self.percentile(75.0),
+        )
+    }
+
+    fn percentile(&self, pct: f64) -> usize {
+        if self.records == 0 {
+            return 0;
+        }
+        let target = (((pct / 100.0) * ((self.records - 1) as f64)).round()) as usize;
+        let mut lengths = self
+            .counts
+            .iter()
+            .map(|(&len, &count)| (len, count))
+            .collect::<Vec<_>>();
+        lengths.sort_unstable_by_key(|(len, _)| *len);
+        let mut seen = 0usize;
+        for (len, count) in lengths {
+            seen += count;
+            if target < seen {
+                return len;
+            }
+        }
+        0
+    }
+}
+
 pub fn run(args: StatsArgs) -> Result<()> {
     let inputs = if args.inputs.is_empty() {
         vec!["-".to_string()]
     } else {
         args.inputs.clone()
     };
-    let mut rows = inputs
-        .par_iter()
-        .map(|p| build_row(p, &args))
-        .collect::<Result<Vec<_>>>()?;
+    let mut rows = if inputs.iter().any(|p| p == "-") {
+        inputs
+            .iter()
+            .map(|p| build_row(p, &args))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        inputs
+            .par_iter()
+            .map(|p| build_row(p, &args))
+            .collect::<Result<Vec<_>>>()?
+    };
     rows.sort_unstable_by(|a, b| a.file.cmp(&b.file));
     let all_columns = choose_all_columns(&rows);
 
@@ -145,7 +238,7 @@ fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
     match fmt {
         SeqFormat::Fasta | SeqFormat::Fastq => build_seq_row_streaming(p, &args.format),
         SeqFormat::Sam => build_sam_row_streaming(p),
-        SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt),
+        SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt, args.threads),
     }
 }
 
@@ -158,27 +251,45 @@ fn build_seq_row_streaming(file: &str, format_arg: &crate::cli::FormatArg) -> Re
     }
 }
 
-fn build_fasta_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
-    let fa = bio::io::fasta::Reader::new(reader);
+fn build_fasta_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut acc = SeqAcc::new();
-    let mut lens = Vec::new();
+    let mut lens = LenDist::default();
     let mut n_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
+    let mut line = String::new();
+    let mut in_record = false;
+    let mut current_len = 0usize;
+    let mut current_gc = 0usize;
 
-    for r in fa.records() {
-        let r = r?;
-        let seq = r.seq();
-        let len = seq.len();
-        acc = acc.merge(SeqAcc::with_record(
-            len,
-            bytecount::count(seq, b'G')
-                + bytecount::count(seq, b'g')
-                + bytecount::count(seq, b'C')
-                + bytecount::count(seq, b'c'),
-        ));
-        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
-        update_seq_type_counts(seq, &mut type_counts);
-        lens.push(len);
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        let bytes = trim_line_ending(line.as_bytes());
+        if bytes.starts_with(b">") {
+            if in_record {
+                acc = acc.merge(SeqAcc::with_record(current_len, current_gc));
+                lens.add(current_len);
+            }
+            in_record = true;
+            current_len = 0;
+            current_gc = 0;
+        } else if in_record {
+            let metrics = seq_line_metrics(bytes);
+            current_len += metrics.len;
+            current_gc += metrics.gc;
+            n_bases += metrics.n;
+            update_seq_type_counts_from_metrics(metrics, &mut type_counts);
+        } else if !bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            bail!("FASTA sequence data encountered before first header in '{file}'");
+        }
+    }
+
+    if in_record {
+        acc = acc.merge(SeqAcc::with_record(current_len, current_gc));
+        lens.add(current_len);
     }
 
     finalize_seq_row(
@@ -192,45 +303,80 @@ fn build_fasta_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
     )
 }
 
-fn build_fastq_row(file: &str, reader: impl BufRead) -> Result<StatRow> {
-    let fq = bio::io::fastq::Reader::new(reader);
+fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut acc = SeqAcc::new();
-    let mut lens = Vec::new();
+    let mut lens = LenDist::default();
     let mut n_bases = 0usize;
     let mut q_ge_10 = 0usize;
     let mut q_ge_20 = 0usize;
     let mut q_ge_30 = 0usize;
     let mut qual_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
+    let mut line = String::new();
 
-    for r in fq.records() {
-        let r = r?;
-        let seq = r.seq();
-        let len = seq.len();
-        acc = acc.merge(SeqAcc::with_record(
-            len,
-            bytecount::count(seq, b'G')
-                + bytecount::count(seq, b'g')
-                + bytecount::count(seq, b'C')
-                + bytecount::count(seq, b'c'),
-        ));
-        n_bases += bytecount::count(seq, b'N') + bytecount::count(seq, b'n');
-        update_seq_type_counts(seq, &mut type_counts);
-        lens.push(len);
-
-        for q in r.qual().iter().copied() {
-            let phred = q.saturating_sub(33);
-            if phred >= 10 {
-                q_ge_10 += 1;
-            }
-            if phred >= 20 {
-                q_ge_20 += 1;
-            }
-            if phred >= 30 {
-                q_ge_30 += 1;
-            }
-            qual_bases += 1;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
         }
+        if !line.starts_with('@') {
+            bail!("FASTQ record in '{file}' does not start with '@'");
+        }
+
+        let mut lines_read = 0usize;
+        let mut seq_len = 0usize;
+        let mut seq_gc = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                bail!("incomplete FASTQ record in '{file}': missing '+' separator");
+            }
+            if line.starts_with('+') {
+                break;
+            }
+            let bytes = trim_line_ending(line.as_bytes());
+            let metrics = seq_line_metrics(bytes);
+            seq_len += metrics.len;
+            seq_gc += metrics.gc;
+            n_bases += metrics.n;
+            update_seq_type_counts_from_metrics(metrics, &mut type_counts);
+            lines_read += 1;
+        }
+        if lines_read == 0 {
+            bail!("incomplete FASTQ record in '{file}': missing sequence");
+        }
+
+        let mut qual_len = 0usize;
+        for _ in 0..lines_read {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                bail!("incomplete FASTQ record in '{file}': missing qualities");
+            }
+            let qual = trim_line_ending(line.as_bytes());
+            qual_len += qual.len();
+            for q in qual.iter().copied() {
+                let phred = q.saturating_sub(33);
+                if phred >= 10 {
+                    q_ge_10 += 1;
+                }
+                if phred >= 20 {
+                    q_ge_20 += 1;
+                }
+                if phred >= 30 {
+                    q_ge_30 += 1;
+                }
+                qual_bases += 1;
+            }
+        }
+        if qual_len != seq_len {
+            bail!(
+                "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
+            );
+        }
+
+        acc = acc.merge(SeqAcc::with_record(seq_len, seq_gc));
+        lens.add(seq_len);
     }
 
     let q_pcts = (
@@ -253,7 +399,7 @@ fn finalize_seq_row(
     file: &str,
     fmt: SeqFormat,
     acc: SeqAcc,
-    lens: Vec<usize>,
+    lens: LenDist,
     n_bases: usize,
     q_pcts: (Option<f64>, Option<f64>, Option<f64>),
     type_counts: SeqTypeCounts,
@@ -272,8 +418,8 @@ fn finalize_seq_row(
     } else {
         0.0
     };
-    let (n50, l50) = calc_nx_lx(&lens, 50.0);
-    let (q1_len, median_len, q3_len) = calc_quartiles(&lens);
+    let (n50, l50) = lens.nx_lx(50.0);
+    let (q1_len, median_len, q3_len) = lens.quartiles();
     let n_pct = calc_pct(n_bases, total_bases);
     let (q10_pct, q20_pct, q30_pct) = q_pcts;
     Ok(StatRow {
@@ -301,7 +447,7 @@ fn finalize_seq_row(
 fn build_sam_row_streaming(p: &str) -> Result<StatRow> {
     let r = io::open_reader(Some(p))?;
     let r = io::wrap_decompress(r, Some(p), &crate::cli::CompressionArg::Auto)?;
-    let br = std::io::BufReader::new(r);
+    let br = io::buffered_reader(r);
     let mut records = 0usize;
     for line in br.lines() {
         let line = line?;
@@ -331,8 +477,11 @@ fn build_sam_row_streaming(p: &str) -> Result<StatRow> {
     })
 }
 
-fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
+fn build_hts_row(p: &str, fmt: SeqFormat, threads: Option<usize>) -> Result<StatRow> {
     let mut reader = bam::Reader::from_path(p)?;
+    if let Some(threads) = threads.filter(|&t| t > 1) {
+        reader.set_threads(threads)?;
+    }
     let mut records = 0usize;
     let mut total_bases = 0usize;
     let mut min_len = usize::MAX;
@@ -343,7 +492,7 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
     let mut q_ge_20 = 0usize;
     let mut q_ge_30 = 0usize;
     let mut qual_bases = 0usize;
-    let mut lens = Vec::new();
+    let mut lens = LenDist::default();
     let mut type_counts = SeqTypeCounts::default();
 
     for rec in reader.records() {
@@ -360,8 +509,8 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
             + bytecount::count(&seq, b'c');
         n_bases += bytecount::count(&seq, b'N') + bytecount::count(&seq, b'n');
         update_seq_type_counts(&seq, &mut type_counts);
-        for q in rec.qual().iter() {
-            let phred = q.saturating_sub(33);
+        for q in rec.qual().iter().copied() {
+            let phred = q;
             if phred >= 10 {
                 q_ge_10 += 1;
             }
@@ -373,7 +522,7 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
             }
             qual_bases += 1;
         }
-        lens.push(len);
+        lens.add(len);
     }
 
     let min_len = if records > 0 { min_len } else { 0 };
@@ -388,8 +537,8 @@ fn build_hts_row(p: &str, fmt: SeqFormat) -> Result<StatRow> {
         0.0
     };
 
-    let (n50, l50) = calc_nx_lx(&lens, 50.0);
-    let (q1_len, median_len, q3_len) = calc_quartiles(&lens);
+    let (n50, l50) = lens.nx_lx(50.0);
+    let (q1_len, median_len, q3_len) = lens.quartiles();
     Ok(StatRow {
         file: p.to_string(),
         format: format!("{:?}", fmt).to_lowercase(),
@@ -685,8 +834,50 @@ fn tsv_all_row(r: &StatRow, columns: AllColumns) -> String {
     fields.join("\t")
 }
 
+fn trim_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if bytes.ends_with(b"\n") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.ends_with(b"\r") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn seq_line_metrics(seq: &[u8]) -> SeqLineMetrics {
+    let mut metrics = SeqLineMetrics {
+        len: seq.len(),
+        ..SeqLineMetrics::default()
+    };
+    for &b in seq {
+        match b {
+            b'G' | b'g' | b'C' | b'c' => metrics.gc += 1,
+            b'N' | b'n' => metrics.n += 1,
+            _ => {}
+        }
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
+        metrics.alpha += 1;
+        match b.to_ascii_uppercase() {
+            b'U' => metrics.u += 1,
+            b'T' => metrics.t += 1,
+            b'A' | b'C' | b'G' | b'N' => {}
+            _ => metrics.non_nuc_alpha += 1,
+        }
+    }
+    metrics
+}
+
+fn update_seq_type_counts_from_metrics(metrics: SeqLineMetrics, counts: &mut SeqTypeCounts) {
+    counts.alpha += metrics.alpha;
+    counts.non_nuc_alpha += metrics.non_nuc_alpha;
+    counts.u += metrics.u;
+    counts.t += metrics.t;
+}
+
 fn update_seq_type_counts(seq: &[u8], counts: &mut SeqTypeCounts) {
-    for b in seq.iter().copied() {
+    for &b in seq {
         if !b.is_ascii_alphabetic() {
             continue;
         }
@@ -715,46 +906,6 @@ fn infer_seq_type(counts: SeqTypeCounts) -> String {
         return "RNA".to_string();
     }
     "DNA".to_string()
-}
-
-fn calc_nx_lx(lens: &[usize], x: f64) -> (usize, usize) {
-    if lens.is_empty() {
-        return (0, 0);
-    }
-    let mut v = lens.to_vec();
-    v.sort_unstable_by(|a, b| b.cmp(a));
-    let sum: usize = v.iter().sum();
-    let threshold = (sum as f64) * (x / 100.0);
-    let mut running = 0usize;
-    for (idx, l) in v.iter().copied().enumerate() {
-        running += l;
-        if (running as f64) >= threshold {
-            return (l, idx + 1);
-        }
-    }
-    (0, 0)
-}
-
-fn calc_quartiles(lens: &[usize]) -> (usize, usize, usize) {
-    if lens.is_empty() {
-        return (0, 0, 0);
-    }
-    let mut v = lens.to_vec();
-    v.sort_unstable();
-    (
-        percentile(&v, 25.0),
-        percentile(&v, 50.0),
-        percentile(&v, 75.0),
-    )
-}
-
-fn percentile(sorted: &[usize], pct: f64) -> usize {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let n = sorted.len();
-    let idx = (((pct / 100.0) * ((n - 1) as f64)).round()) as usize;
-    sorted[idx]
 }
 
 fn calc_pct(numerator: usize, denominator: usize) -> f64 {

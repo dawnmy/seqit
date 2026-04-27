@@ -7,6 +7,9 @@ use bio::io::{fasta, fastq};
 use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
+pub const BUFFER_SIZE: usize = 1024 * 1024;
+const PARALLEL_GZIP_LEVEL: u32 = 3;
+
 pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
     let reader: Box<dyn Read> = match path {
         None | Some("-") => Box::new(io::stdin()),
@@ -15,13 +18,24 @@ pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
     Ok(reader)
 }
 
-pub fn open_writer(path: &str) -> Result<Box<dyn Write>> {
-    let writer: Box<dyn Write> = if path == "-" {
+type DynWriter = Box<dyn Write>;
+type DynSendWriter = Box<dyn Write + Send>;
+
+pub fn open_writer(path: &str) -> Result<DynSendWriter> {
+    let writer: DynSendWriter = if path == "-" {
         Box::new(io::stdout())
     } else {
         Box::new(File::create(path).with_context(|| format!("failed to create output '{path}'"))?)
     };
     Ok(writer)
+}
+
+pub fn buffered_reader(reader: Box<dyn Read>) -> BufReader<Box<dyn Read>> {
+    BufReader::with_capacity(BUFFER_SIZE, reader)
+}
+
+pub fn buffered_writer(writer: DynWriter) -> BufWriter<DynWriter> {
+    BufWriter::with_capacity(BUFFER_SIZE, writer)
 }
 
 pub fn wrap_decompress(
@@ -30,24 +44,103 @@ pub fn wrap_decompress(
     mode: &CompressionArg,
 ) -> Result<Box<dyn Read>> {
     match detect_compression(path, mode) {
-        CompressionArg::Gz => Ok(Box::new(flate2::read::MultiGzDecoder::new(reader))),
-        CompressionArg::Xz => Ok(Box::new(xz2::read::XzDecoder::new(reader))),
+        CompressionArg::Gz => Ok(Box::new(flate2::bufread::MultiGzDecoder::new(
+            BufReader::with_capacity(BUFFER_SIZE, reader),
+        ))),
+        CompressionArg::Xz => Ok(Box::new(xz2::bufread::XzDecoder::new_multi_decoder(
+            BufReader::with_capacity(BUFFER_SIZE, reader),
+        ))),
         _ => Ok(reader),
     }
 }
 
 pub fn wrap_compress(
-    writer: Box<dyn Write>,
+    writer: DynSendWriter,
     path: &str,
     mode: &CompressionArg,
-) -> Result<Box<dyn Write>> {
+) -> Result<DynWriter> {
+    wrap_compress_for_streams(writer, path, mode, 1)
+}
+
+pub fn wrap_compress_for_streams(
+    writer: DynSendWriter,
+    path: &str,
+    mode: &CompressionArg,
+    concurrent_streams: usize,
+) -> Result<DynWriter> {
     match detect_compression(Some(path), mode) {
-        CompressionArg::Gz => Ok(Box::new(flate2::write::GzEncoder::new(
+        CompressionArg::Gz => Ok(wrap_gzip_writer(writer, concurrent_streams)),
+        CompressionArg::Xz => wrap_xz_writer(writer, concurrent_streams),
+        _ => Ok(writer),
+    }
+}
+
+fn wrap_gzip_writer(writer: DynSendWriter, concurrent_streams: usize) -> DynWriter {
+    let threads = compression_threads_for_streams(concurrent_streams);
+    if threads <= 1 {
+        return Box::new(flate2::write::GzEncoder::new(
             writer,
             flate2::Compression::default(),
-        ))),
-        CompressionArg::Xz => Ok(Box::new(xz2::write::XzEncoder::new(writer, 6))),
-        _ => Ok(writer),
+        ));
+    }
+    Box::new(ParallelGzipWriter::new(writer, threads))
+}
+
+fn compression_threads_for_streams(concurrent_streams: usize) -> usize {
+    let streams = concurrent_streams.max(1);
+    (rayon::current_num_threads() / streams).max(1)
+}
+
+fn wrap_xz_writer(writer: DynSendWriter, concurrent_streams: usize) -> Result<DynWriter> {
+    let threads = compression_threads_for_streams(concurrent_streams);
+    if threads <= 1 {
+        return Ok(Box::new(xz2::write::XzEncoder::new(writer, 6)));
+    }
+
+    let mut builder = xz2::stream::MtStreamBuilder::new();
+    builder
+        .threads(threads.min(u32::MAX as usize) as u32)
+        .preset(6);
+    let stream = builder.encoder()?;
+    Ok(Box::new(xz2::write::XzEncoder::new_stream(writer, stream)))
+}
+
+struct ParallelGzipWriter {
+    inner: Option<Box<dyn gzp::ZWriter<DynSendWriter>>>,
+}
+
+impl ParallelGzipWriter {
+    fn new(writer: DynSendWriter, threads: usize) -> Self {
+        let inner = gzp::ZBuilder::<gzp::deflate::Gzip, _>::new()
+            .num_threads(threads)
+            .compression_level(flate2::Compression::new(PARALLEL_GZIP_LEVEL))
+            .buffer_size(gzp::BUFSIZE)
+            .from_writer(writer);
+        Self { inner: Some(inner) }
+    }
+}
+
+impl Write for ParallelGzipWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner
+            .as_mut()
+            .expect("gzip writer used after finish")
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .expect("gzip writer used after finish")
+            .flush()
+    }
+}
+
+impl Drop for ParallelGzipWriter {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            let _ = inner.finish();
+        }
     }
 }
 
@@ -74,12 +167,35 @@ pub fn read_records(
 ) -> Result<Vec<SeqRecord>> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let br = BufReader::new(r);
+    let br = buffered_reader(r);
     match format {
         SeqFormat::Fasta => read_fasta(br),
         SeqFormat::Fastq => read_fastq(br),
         _ => bail!("format {:?} not yet implemented for this command", format),
     }
+}
+
+pub fn read_record_pair_parallel(
+    in1: &str,
+    in2: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+) -> Result<(Vec<SeqRecord>, Vec<SeqRecord>)> {
+    if can_parallel_read(in1, in2) {
+        let (r1, r2) = rayon::join(
+            || read_records(Some(in1), format, compression),
+            || read_records(Some(in2), format, compression),
+        );
+        Ok((r1?, r2?))
+    } else {
+        let r1 = read_records(Some(in1), format, compression)?;
+        let r2 = read_records(Some(in2), format, compression)?;
+        Ok((r1, r2))
+    }
+}
+
+fn can_parallel_read(in1: &str, in2: &str) -> bool {
+    in1 != "-" && in2 != "-"
 }
 
 pub fn read_records_with_format(
@@ -90,7 +206,7 @@ pub fn read_records_with_format(
     if matches!(format, FormatArg::Auto) && matches!(path, None | Some("-")) {
         let r = open_reader(path)?;
         let r = wrap_decompress(r, path, compression)?;
-        let mut br = BufReader::new(r);
+        let mut br = buffered_reader(r);
         let fmt = detect_format_from_bufread(&mut br)?;
         let recs = match fmt {
             SeqFormat::Fasta => read_fasta(br)?,
@@ -111,7 +227,7 @@ pub fn open_seq_reader(
 ) -> Result<(SeqFormat, BufReader<Box<dyn Read>>)> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let mut br = BufReader::new(r);
+    let mut br = buffered_reader(r);
 
     let fmt = if let Some(fmt) = SeqFormat::from_arg(format) {
         fmt
@@ -152,7 +268,7 @@ fn detect_format_from_stream(
 ) -> Result<SeqFormat> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
-    let mut br = BufReader::new(r);
+    let mut br = buffered_reader(r);
     detect_format_from_bufread(&mut br)
 }
 
@@ -188,14 +304,122 @@ pub fn write_records(
     compression: &CompressionArg,
     records: &[SeqRecord],
 ) -> Result<()> {
+    write_records_for_streams(path, format, compression, records, 1)
+}
+
+fn write_records_for_streams(
+    path: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+    records: &[SeqRecord],
+    concurrent_streams: usize,
+) -> Result<()> {
     let w = open_writer(path)?;
-    let w = wrap_compress(w, path, compression)?;
-    let bw = BufWriter::new(w);
+    let w = wrap_compress_for_streams(w, path, compression, concurrent_streams)?;
+    let mut bw = buffered_writer(w);
+    for rec in records {
+        write_record(&mut bw, format, rec)?;
+    }
+    bw.flush()?;
+    Ok(())
+}
+
+pub fn write_record_pair_parallel(
+    out1: &str,
+    out2: &str,
+    format: SeqFormat,
+    compression: &CompressionArg,
+    records1: &[SeqRecord],
+    records2: &[SeqRecord],
+) -> Result<()> {
+    if can_parallel_write(out1, out2) {
+        let (left, right) = rayon::join(
+            || write_records_for_streams(out1, format, compression, records1, 2),
+            || write_records_for_streams(out2, format, compression, records2, 2),
+        );
+        left?;
+        right?;
+        Ok(())
+    } else {
+        write_records(out1, format, compression, records1)?;
+        write_records(out2, format, compression, records2)
+    }
+}
+
+fn can_parallel_write(out1: &str, out2: &str) -> bool {
+    out1 != "-" && out2 != "-" && out1 != out2
+}
+
+pub fn for_each_record(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+    mut f: impl FnMut(SeqRecord) -> Result<()>,
+) -> Result<SeqFormat> {
+    let (fmt, br) = open_seq_reader(path, format, compression)?;
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for r in fa.records() {
+                let r = r?;
+                f(SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: None,
+                })?;
+            }
+        }
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for r in fq.records() {
+                let r = r?;
+                f(SeqRecord {
+                    id: r.id().to_string(),
+                    desc: r.desc().map(|d| d.to_string()),
+                    seq: r.seq().to_vec(),
+                    qual: Some(r.qual().to_vec()),
+                })?;
+            }
+        }
+        _ => bail!("format {:?} not yet implemented for this command", fmt),
+    }
+    Ok(fmt)
+}
+
+pub fn write_record(writer: &mut impl Write, format: SeqFormat, rec: &SeqRecord) -> Result<()> {
     match format {
-        SeqFormat::Fasta => write_fasta(bw, records),
-        SeqFormat::Fastq => write_fastq(bw, records),
+        SeqFormat::Fasta => {
+            writer.write_all(b">")?;
+            write_header(writer, rec)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n")?;
+        }
+        SeqFormat::Fastq => {
+            let Some(q) = &rec.qual else {
+                bail!("record '{}' missing qualities for FASTQ output", rec.id);
+            };
+            writer.write_all(b"@")?;
+            write_header(writer, rec)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n+\n")?;
+            writer.write_all(q)?;
+            writer.write_all(b"\n")?;
+        }
         _ => bail!("format {:?} not yet implemented for this command", format),
     }
+    Ok(())
+}
+
+fn write_header(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
+    writer.write_all(rec.id.as_bytes())?;
+    if let Some(desc) = &rec.desc {
+        writer.write_all(b" ")?;
+        writer.write_all(desc.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn read_fasta(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
@@ -226,23 +450,4 @@ fn read_fastq(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
         });
     }
     Ok(out)
-}
-
-fn write_fasta(writer: impl Write, records: &[SeqRecord]) -> Result<()> {
-    let mut w = fasta::Writer::new(writer);
-    for r in records {
-        w.write(&r.id, r.desc.as_deref(), &r.seq)?;
-    }
-    Ok(())
-}
-
-fn write_fastq(writer: impl Write, records: &[SeqRecord]) -> Result<()> {
-    let mut w = fastq::Writer::new(writer);
-    for r in records {
-        let Some(q) = &r.qual else {
-            bail!("record '{}' missing qualities for FASTQ output", r.id);
-        };
-        w.write(&r.id, r.desc.as_deref(), &r.seq, q)?;
-    }
-    Ok(())
 }

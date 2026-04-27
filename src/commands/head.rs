@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use bio::io::{fasta, fastq};
-use std::io::BufReader;
 
 use crate::{cli::HeadArgs, formats::SeqFormat, io, utils};
 
@@ -20,22 +19,21 @@ pub fn run(args: HeadArgs) -> Result<()> {
         if let Some(num) = args.num {
             return run_paired_streaming_num(&args, in1, in2, out2, num);
         }
-        let r1 = io::read_records(Some(in1), SeqFormat::Fastq, &args.io.compression)?;
-        let r2 = io::read_records(Some(in2), SeqFormat::Fastq, &args.io.compression)?;
-        let keep = n(r1.len().min(r2.len()));
-        io::write_records(
-            &args.io.output,
-            SeqFormat::Fastq,
-            &args.io.compression,
-            &r1[..keep],
-        )?;
-        io::write_records(out2, SeqFormat::Fastq, &args.io.compression, &r2[..keep])?;
-        return Ok(());
+        if in1 == "-" || in2 == "-" {
+            bail!("head --proportion for paired stdin is not supported; use --num for streaming paired input");
+        }
+        let total = count_valid_pairs(&args, in1, in2)?;
+        return run_paired_streaming_num(&args, in1, in2, out2, n(total));
     }
 
     let in_path = args.io.input.as_deref();
     if let Some(num) = args.num {
         return run_single_streaming_num(&args, in_path, num);
+    }
+    if !matches!(in_path, None | Some("-")) {
+        let (fmt, r) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
+        let total = count_records(fmt, r)?;
+        return run_single_streaming_num(&args, in_path, n(total));
     }
     let (fmt, recs) = io::read_records_with_format(in_path, &args.io.format, &args.io.compression)?;
     let keep = n(recs.len());
@@ -79,17 +77,17 @@ fn run_paired_streaming_num(
     let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
     let r2 = io::open_reader(Some(in2))?;
     let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(BufReader::new(r1));
-    let fq2 = fastq::Reader::new(BufReader::new(r2));
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
     let mut it1 = fq1.records();
     let mut it2 = fq2.records();
 
     let w1 = io::open_writer(&args.io.output)?;
-    let w1 = io::wrap_compress(w1, &args.io.output, &args.io.compression)?;
+    let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
-    let w2 = io::wrap_compress(w2, out2, &args.io.compression)?;
-    let mut w1 = fastq::Writer::new(w1);
-    let mut w2 = fastq::Writer::new(w2);
+    let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
+    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
+    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
 
     let mut kept = 0usize;
     let mut invalid = 0usize;
@@ -144,6 +142,72 @@ fn pair_key(id: &str) -> &str {
     id.strip_suffix("/1")
         .or_else(|| id.strip_suffix("/2"))
         .unwrap_or(id)
+}
+
+fn count_records(fmt: SeqFormat, br: std::io::BufReader<Box<dyn std::io::Read>>) -> Result<usize> {
+    let mut total = 0usize;
+    match fmt {
+        SeqFormat::Fasta => {
+            let fa = fasta::Reader::new(br);
+            for rec in fa.records() {
+                rec?;
+                total += 1;
+            }
+        }
+        SeqFormat::Fastq => {
+            let fq = fastq::Reader::new(br);
+            for rec in fq.records() {
+                rec?;
+                total += 1;
+            }
+        }
+        _ => bail!("head currently supports FASTA/FASTQ input"),
+    }
+    Ok(total)
+}
+
+fn count_valid_pairs(args: &HeadArgs, in1: &str, in2: &str) -> Result<usize> {
+    let r1 = io::open_reader(Some(in1))?;
+    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
+    let r2 = io::open_reader(Some(in2))?;
+    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
+    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
+    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
+    let mut it1 = fq1.records();
+    let mut it2 = fq2.records();
+    let mut valid = 0usize;
+    loop {
+        let a = it1.next().transpose()?;
+        let b = it2.next().transpose()?;
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                if pair_key(a.id()) == pair_key(b.id()) {
+                    valid += 1;
+                } else if !args.allow_unpaired {
+                    bail!(
+                        "paired inputs contain invalid/unpaired records (first mismatch: R1={} R2={}); rerun with --allow-unpaired to continue",
+                        a.id(),
+                        b.id()
+                    );
+                }
+            }
+            (Some(a), None) if !args.allow_unpaired => {
+                bail!(
+                    "paired inputs contain unmatched record in R1 ({}); rerun with --allow-unpaired to continue",
+                    a.id()
+                );
+            }
+            (None, Some(b)) if !args.allow_unpaired => {
+                bail!(
+                    "paired inputs contain unmatched record in R2 ({}); rerun with --allow-unpaired to continue",
+                    b.id()
+                );
+            }
+            (None, None) => break,
+            _ => {}
+        }
+    }
+    Ok(valid)
 }
 
 fn resolve_take(

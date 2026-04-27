@@ -61,10 +61,12 @@ pub struct SeqRecord {
 }
 
 impl SeqRecord {
-    pub fn name(&self) -> String {
-        match &self.desc {
-            Some(d) => format!("{} {}", self.id, d),
-            None => self.id.clone(),
-        }
+    pub fn approx_bytes(&self) -> usize {
+        const RECORD_OVERHEAD: usize = 96;
+        RECORD_OVERHEAD
+            + self.id.len()
+            + self.desc.as_ref().map_or(0, |d| d.len())
+            + self.seq.len()
+            + self.qual.as_ref().map_or(0, |q| q.len())
     }
 }
