@@ -4,6 +4,8 @@
 
 ## Installation
 
+Download the latest precompiled binary for your platform from the [GitHub releases page](https://github.com/dawnmy/seqit/releases), or build from source as described below.
+
 ```bash
 cargo build --release
 ./target/release/seqit --help
