@@ -1,11 +1,10 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
 };
 
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 use regex::Regex;
 
 use crate::{
@@ -188,30 +187,50 @@ fn run_single_streaming(
     let (fmt, br) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
+    let mut out = io::buffered_writer(w);
     let mut idx = 0usize;
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            let mut out = fasta::Writer::new(io::buffered_writer(w));
-            for rec in fa.records() {
-                let rec = rec?;
-                let id = rename_id(args, mode, idx, rec.id(), mapping, regex, replacement)?;
-                out.write(&id, rec.desc(), rec.seq())?;
-                idx += 1;
-            }
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            let mut out = fastq::Writer::new(io::buffered_writer(w));
-            for rec in fq.records() {
-                let rec = rec?;
-                let id = rename_id(args, mode, idx, rec.id(), mapping, regex, replacement)?;
-                out.write(&id, rec.desc(), rec.seq(), rec.qual())?;
-                idx += 1;
-            }
-        }
-        _ => bail!("rename currently supports FASTA/FASTQ input"),
+    if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
+        bail!("rename currently supports FASTA/FASTQ input");
     }
+    io::for_each_record_from_reader(br, fmt, |rec| {
+        let id = rename_id(args, mode, idx, rec.id_str()?, mapping, regex, replacement)?;
+        match fmt {
+            SeqFormat::Fasta => {
+                out.write_all(b">")?;
+                out.write_all(id.as_bytes())?;
+                if let Some(desc) = rec.desc {
+                    out.write_all(b" ")?;
+                    out.write_all(desc)?;
+                }
+                out.write_all(b"\n")?;
+                out.write_all(&rec.seq)?;
+                out.write_all(b"\n")?;
+            }
+            SeqFormat::Fastq => {
+                let Some(qual) = rec.qual else {
+                    bail!(
+                        "record '{}' missing qualities for FASTQ output",
+                        rec.id_str()?
+                    );
+                };
+                out.write_all(b"@")?;
+                out.write_all(id.as_bytes())?;
+                if let Some(desc) = rec.desc {
+                    out.write_all(b" ")?;
+                    out.write_all(desc)?;
+                }
+                out.write_all(b"\n")?;
+                out.write_all(&rec.seq)?;
+                out.write_all(b"\n+\n")?;
+                out.write_all(qual)?;
+                out.write_all(b"\n")?;
+            }
+            _ => unreachable!("format checked before streaming"),
+        }
+        idx += 1;
+        Ok(())
+    })?;
+    out.flush()?;
     Ok(())
 }
 
@@ -222,42 +241,33 @@ fn run_paired_streaming(
     out2: &str,
     plan: RenamePlan<'_>,
 ) -> Result<()> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let w1 = io::open_writer(&args.io.output)?;
     let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
-    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
-    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
+    let mut w1 = io::buffered_writer(w1);
+    let mut w2 = io::buffered_writer(w2);
 
     let mut idx = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) != pair_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_key(a_id) != pair_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
                 let core = rename_id(
                     args,
                     plan.mode,
                     idx,
-                    a.id(),
+                    a_id,
                     plan.mapping,
                     plan.regex,
                     plan.replacement,
@@ -267,26 +277,50 @@ fn run_paired_streaming(
                 } else {
                     (core.clone(), core)
                 };
-                w1.write(&id1, a.desc(), a.seq(), a.qual())?;
-                w2.write(&id2, b.desc(), b.seq(), b.qual())?;
+                write_renamed_fastq(&mut w1, &id1, a.desc, &a.seq, a.qual)?;
+                write_renamed_fastq(&mut w2, &id2, b.desc, &b.seq, b.qual)?;
                 idx += 1;
             }
-            (Some(a), None) => {
+            io::FastqPair::Left(a) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R1: {}", a.id()));
+                    invalid_preview.push(format!("unmatched in R1: {}", a.id_str()?));
                 }
             }
-            (None, Some(b)) => {
+            io::FastqPair::Right(b) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R2: {}", b.id()));
+                    invalid_preview.push(format!("unmatched in R2: {}", b.id_str()?));
                 }
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)
+}
+
+fn write_renamed_fastq(
+    out: &mut impl Write,
+    id: &str,
+    desc: Option<&[u8]>,
+    seq: &[u8],
+    qual: Option<&[u8]>,
+) -> Result<()> {
+    let Some(qual) = qual else {
+        bail!("record '{id}' missing qualities for FASTQ output");
+    };
+    out.write_all(b"@")?;
+    out.write_all(id.as_bytes())?;
+    if let Some(desc) = desc {
+        out.write_all(b" ")?;
+        out.write_all(desc)?;
+    }
+    out.write_all(b"\n")?;
+    out.write_all(seq)?;
+    out.write_all(b"\n+\n")?;
+    out.write_all(qual)?;
+    out.write_all(b"\n")?;
+    Ok(())
 }
 
 struct RenamePlan<'a> {

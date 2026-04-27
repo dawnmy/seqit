@@ -2,10 +2,9 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use anyhow::{bail, Result};
-use bio::io::{fasta, fastq};
 
 use crate::cli::SeqArgs;
-use crate::formats::SeqFormat;
+use crate::formats::{SeqFormat, SeqRecord};
 use crate::io;
 
 pub fn run(args: SeqArgs) -> Result<()> {
@@ -25,44 +24,28 @@ pub fn run(args: SeqArgs) -> Result<()> {
     let gap_letters = args
         .remove_gaps
         .then(|| parse_gap_letters(&args.gap_letters));
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for r in fa.records() {
-                let r = r?;
-                let mut rec = crate::formats::SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: None,
-                };
-                if !process_record(&args, &gap_letters, &mut rec)? {
-                    continue;
-                }
+    let needs_owned = needs_owned_record(&args);
+    io::for_each_record_from_reader(br, fmt, |rec| {
+        if needs_owned {
+            let mut rec = rec.to_owned_record()?;
+            if process_owned_record(&args, &gap_letters, &mut rec)? {
                 write_record(&args, fmt, &mut bw, &rec)?;
             }
+            return Ok(());
         }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for r in fq.records() {
-                let r = r?;
-                let mut rec = crate::formats::SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: Some(r.qual().to_vec()),
-                };
-                if !process_record(&args, &gap_letters, &mut rec)? {
-                    continue;
-                }
-                write_record(&args, fmt, &mut bw, &rec)?;
-            }
+
+        if process_record_ref(&args, &rec)? {
+            write_record_ref(&args, fmt, &mut bw, &rec)?;
         }
-        _ => bail!("format {:?} not yet implemented for seq output", fmt),
-    }
+        Ok(())
+    })?;
 
     bw.flush()?;
     Ok(())
+}
+
+fn needs_owned_record(args: &SeqArgs) -> bool {
+    args.rev || args.comp || args.revcomp || args.upper || args.lower || args.remove_gaps
 }
 
 fn average_quality(qual: &[u8], ascii_base: u8) -> f64 {
@@ -103,10 +86,44 @@ fn find_invalid_iupac(seq: &[u8]) -> Option<u8> {
     })
 }
 
-fn process_record(
+fn process_record_ref(args: &SeqArgs, rec: &io::SeqRecordRef<'_>) -> Result<bool> {
+    let len = rec.seq.len();
+    let len_ok = args.min_len.map(|m| len >= m).unwrap_or(true)
+        && args.max_len.map(|m| len <= m).unwrap_or(true);
+    if !len_ok {
+        return Ok(false);
+    }
+
+    let qual_filter_enabled = args.min_qual >= 0.0 || args.max_qual >= 0.0;
+    if qual_filter_enabled {
+        let Some(q) = rec.qual else {
+            bail!("--min-qual/--max-qual require FASTQ records with qualities");
+        };
+        let avg = average_quality(q, args.qual_ascii_base);
+        if (args.min_qual >= 0.0 && avg < args.min_qual)
+            || (args.max_qual >= 0.0 && avg > args.max_qual)
+        {
+            return Ok(false);
+        }
+    }
+
+    if args.validate_seq {
+        if let Some(ch) = find_invalid_iupac(&rec.seq) {
+            bail!(
+                "record '{}' contains invalid base '{}'",
+                rec.id_str()?,
+                ch as char
+            );
+        }
+    }
+
+    Ok(true)
+}
+
+fn process_owned_record(
     args: &SeqArgs,
     gap_letters: &Option<HashSet<u8>>,
-    rec: &mut crate::formats::SeqRecord,
+    rec: &mut SeqRecord,
 ) -> Result<bool> {
     let len = rec.seq.len();
     let len_ok = args.min_len.map(|m| len >= m).unwrap_or(true)
@@ -166,7 +183,7 @@ fn write_record(
     args: &SeqArgs,
     fmt: SeqFormat,
     bw: &mut impl Write,
-    rec: &crate::formats::SeqRecord,
+    rec: &SeqRecord,
 ) -> Result<()> {
     if args.seq {
         write_seq_line(bw, &rec.seq, args.color)?;
@@ -206,13 +223,40 @@ fn write_record(
     Ok(())
 }
 
+fn write_record_ref(
+    args: &SeqArgs,
+    fmt: SeqFormat,
+    bw: &mut impl Write,
+    rec: &io::SeqRecordRef<'_>,
+) -> Result<()> {
+    if args.seq {
+        write_seq_line(bw, &rec.seq, args.color)?;
+        return Ok(());
+    }
+    if args.only_id {
+        write_line_bytes(bw, rec.id)?;
+        return Ok(());
+    }
+    if args.name {
+        if args.full_name {
+            io::write_header_bytes(bw, rec.id, rec.desc)?;
+            bw.write_all(b"\n")?;
+        } else {
+            write_line_bytes(bw, rec.id)?;
+        }
+        return Ok(());
+    }
+
+    io::write_record_ref(bw, fmt, rec)
+}
+
 fn write_line_bytes(writer: &mut impl Write, line: &[u8]) -> Result<()> {
     writer.write_all(line)?;
     writer.write_all(b"\n")?;
     Ok(())
 }
 
-fn write_full_name_line(writer: &mut impl Write, rec: &crate::formats::SeqRecord) -> Result<()> {
+fn write_full_name_line(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
     writer.write_all(rec.id.as_bytes())?;
     if let Some(desc) = &rec.desc {
         writer.write_all(b" ")?;

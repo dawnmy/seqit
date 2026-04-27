@@ -324,9 +324,9 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
             bail!("FASTQ record in '{file}' does not start with '@'");
         }
 
-        let mut lines_read = 0usize;
         let mut seq_len = 0usize;
         let mut seq_gc = 0usize;
+        let mut saw_sequence = false;
         loop {
             line.clear();
             if reader.read_line(&mut line)? == 0 {
@@ -341,20 +341,30 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
             seq_gc += metrics.gc;
             n_bases += metrics.n;
             update_seq_type_counts_from_metrics(metrics, &mut type_counts);
-            lines_read += 1;
+            saw_sequence = true;
         }
-        if lines_read == 0 {
+        if !saw_sequence {
             bail!("incomplete FASTQ record in '{file}': missing sequence");
         }
 
         let mut qual_len = 0usize;
-        for _ in 0..lines_read {
+        while qual_len < seq_len {
             line.clear();
             if reader.read_line(&mut line)? == 0 {
+                if qual_len > 0 {
+                    bail!(
+                        "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
+                    );
+                }
                 bail!("incomplete FASTQ record in '{file}': missing qualities");
             }
             let qual = trim_line_ending(line.as_bytes());
             qual_len += qual.len();
+            if qual_len > seq_len {
+                bail!(
+                    "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
+                );
+            }
             for q in qual.iter().copied() {
                 let phred = q.saturating_sub(33);
                 if phred >= 10 {

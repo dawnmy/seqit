@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 
 use crate::{cli::HeadArgs, formats::SeqFormat, io, utils};
 
@@ -44,25 +43,16 @@ fn run_single_streaming_num(args: &HeadArgs, in_path: Option<&str>, n: usize) ->
     let (fmt, r) = io::open_seq_reader(in_path, &args.io.format, &args.io.compression)?;
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(r);
-            let mut out = fasta::Writer::new(w);
-            for rec in fa.records().take(n) {
-                let rec = rec?;
-                out.write(rec.id(), rec.desc(), rec.seq())?;
-            }
+    let mut out = io::buffered_writer(w);
+    let mut kept = 0usize;
+    io::for_each_record_from_reader_until(r, fmt, |rec| {
+        if kept >= n {
+            return Ok(false);
         }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(r);
-            let mut out = fastq::Writer::new(w);
-            for rec in fq.records().take(n) {
-                let rec = rec?;
-                out.write(rec.id(), rec.desc(), rec.seq(), rec.qual())?;
-            }
-        }
-        _ => bail!("head currently supports FASTA/FASTQ input"),
-    }
+        io::write_record_ref(&mut out, fmt, &rec)?;
+        kept += 1;
+        Ok(kept < n)
+    })?;
     Ok(())
 }
 
@@ -73,64 +63,62 @@ fn run_paired_streaming_num(
     out2: &str,
     n: usize,
 ) -> Result<()> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let w1 = io::open_writer(&args.io.output)?;
     let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
-    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
-    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
+    let mut w1 = io::buffered_writer(w1);
+    let mut w2 = io::buffered_writer(w2);
 
     let mut kept = 0usize;
     let mut invalid = 0usize;
-    while kept < n {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) != pair_key(b.id()) {
+    if n > 0 {
+        io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+            if kept >= n {
+                return Ok(false);
+            }
+            match pair {
+                io::FastqPair::Both(a, b) => {
+                    let a_id = a.id_str()?;
+                    let b_id = b.id_str()?;
+                    if pair_key(a_id) != pair_key(b_id) {
+                        invalid += 1;
+                        if !args.allow_unpaired {
+                            bail!(
+                                "paired inputs contain invalid/unpaired records (first mismatch: R1={} R2={}); rerun with --allow-unpaired to continue",
+                                a_id,
+                                b_id
+                            );
+                        }
+                        return Ok(true);
+                    }
+                    io::write_record_ref(&mut w1, SeqFormat::Fastq, &a)?;
+                    io::write_record_ref(&mut w2, SeqFormat::Fastq, &b)?;
+                    kept += 1;
+                    Ok(kept < n)
+                }
+                io::FastqPair::Left(a) => {
                     invalid += 1;
                     if !args.allow_unpaired {
                         bail!(
-                            "paired inputs contain invalid/unpaired records (first mismatch: R1={} R2={}); rerun with --allow-unpaired to continue",
-                            a.id(),
-                            b.id()
+                            "paired inputs contain unmatched record in R1 ({}); rerun with --allow-unpaired to continue",
+                            a.id_str()?
                         );
                     }
-                    continue;
+                    Ok(true)
                 }
-                w1.write(a.id(), a.desc(), a.seq(), a.qual())?;
-                w2.write(b.id(), b.desc(), b.seq(), b.qual())?;
-                kept += 1;
-            }
-            (Some(a), None) => {
-                invalid += 1;
-                if !args.allow_unpaired {
-                    bail!(
-                        "paired inputs contain unmatched record in R1 ({}); rerun with --allow-unpaired to continue",
-                        a.id()
-                    );
+                io::FastqPair::Right(b) => {
+                    invalid += 1;
+                    if !args.allow_unpaired {
+                        bail!(
+                            "paired inputs contain unmatched record in R2 ({}); rerun with --allow-unpaired to continue",
+                            b.id_str()?
+                        );
+                    }
+                    Ok(true)
                 }
             }
-            (None, Some(b)) => {
-                invalid += 1;
-                if !args.allow_unpaired {
-                    bail!(
-                        "paired inputs contain unmatched record in R2 ({}); rerun with --allow-unpaired to continue",
-                        b.id()
-                    );
-                }
-            }
-            (None, None) => break,
-        }
+        })?;
     }
     if invalid > 0 && args.allow_unpaired {
         eprintln!("warning: skipped {invalid} invalid/unpaired paired records");
@@ -144,69 +132,48 @@ fn pair_key(id: &str) -> &str {
         .unwrap_or(id)
 }
 
-fn count_records(fmt: SeqFormat, br: std::io::BufReader<Box<dyn std::io::Read>>) -> Result<usize> {
+fn count_records(fmt: SeqFormat, br: io::DynBufReader) -> Result<usize> {
     let mut total = 0usize;
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for rec in fa.records() {
-                rec?;
-                total += 1;
-            }
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for rec in fq.records() {
-                rec?;
-                total += 1;
-            }
-        }
-        _ => bail!("head currently supports FASTA/FASTQ input"),
-    }
+    io::for_each_record_from_reader(br, fmt, |_| {
+        total += 1;
+        Ok(())
+    })?;
     Ok(total)
 }
 
 fn count_valid_pairs(args: &HeadArgs, in1: &str, in2: &str) -> Result<usize> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
     let mut valid = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) == pair_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_key(a_id) == pair_key(b_id) {
                     valid += 1;
                 } else if !args.allow_unpaired {
                     bail!(
                         "paired inputs contain invalid/unpaired records (first mismatch: R1={} R2={}); rerun with --allow-unpaired to continue",
-                        a.id(),
-                        b.id()
+                        a_id,
+                        b_id
                     );
                 }
             }
-            (Some(a), None) if !args.allow_unpaired => {
+            io::FastqPair::Left(a) if !args.allow_unpaired => {
                 bail!(
                     "paired inputs contain unmatched record in R1 ({}); rerun with --allow-unpaired to continue",
-                    a.id()
+                    a.id_str()?
                 );
             }
-            (None, Some(b)) if !args.allow_unpaired => {
+            io::FastqPair::Right(b) if !args.allow_unpaired => {
                 bail!(
                     "paired inputs contain unmatched record in R2 ({}); rerun with --allow-unpaired to continue",
-                    b.id()
+                    b.id_str()?
                 );
             }
-            (None, None) => break,
             _ => {}
         }
-    }
+        Ok(true)
+    })?;
     Ok(valid)
 }
 

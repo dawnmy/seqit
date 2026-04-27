@@ -1,9 +1,7 @@
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use std::io::BufReader;
 
 use crate::{
     cli::SampleArgs,
@@ -80,35 +78,7 @@ fn run_single_streaming(args: SampleArgs, rng: &mut ChaCha20Rng) -> Result<()> {
 
     log_info(&args, "sample by number");
     let n = args.num.unwrap();
-    let (out, processed) = match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(reader);
-            let iter = fa.records().map(|r| {
-                let r = r?;
-                Ok(SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: None,
-                })
-            });
-            reservoir_from_result_iter(iter, n, rng, &pb)?
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(reader);
-            let iter = fq.records().map(|r| {
-                let r = r?;
-                Ok(SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: Some(r.qual().to_vec()),
-                })
-            });
-            reservoir_from_result_iter(iter, n, rng, &pb)?
-        }
-        _ => bail!("sample currently supports FASTA/FASTQ input"),
-    };
+    let (out, processed) = reservoir_from_reader(reader, fmt, n, rng, &pb)?;
     finish_progress(&pb);
     log_info(
         &args,
@@ -128,58 +98,49 @@ fn sample_paired_rate_streaming(
     rate: f64,
     rng: &mut ChaCha20Rng,
 ) -> Result<usize> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let w1 = io::open_writer(&args.io.output)?;
     let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
-    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
-    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
+    let mut w1 = io::buffered_writer(w1);
+    let mut w2 = io::buffered_writer(w2);
 
     let mut outputted = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) != pair_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_key(a_id) != pair_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
                 if rng.random::<f64>() <= rate {
-                    w1.write(a.id(), a.desc(), a.seq(), a.qual())?;
-                    w2.write(b.id(), b.desc(), b.seq(), b.qual())?;
+                    io::write_record_ref(&mut w1, SeqFormat::Fastq, &a)?;
+                    io::write_record_ref(&mut w2, SeqFormat::Fastq, &b)?;
                     outputted += 1;
                 }
             }
-            (Some(a), None) => {
+            io::FastqPair::Left(a) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R1: {}", a.id()));
+                    invalid_preview.push(format!("unmatched in R1: {}", a.id_str()?));
                 }
             }
-            (None, Some(b)) => {
+            io::FastqPair::Right(b) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R2: {}", b.id()));
+                    invalid_preview.push(format!("unmatched in R2: {}", b.id_str()?));
                 }
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
     Ok(outputted)
 }
@@ -192,70 +153,47 @@ fn sample_paired_num_streaming(
     rng: &mut ChaCha20Rng,
     allow_unpaired: bool,
 ) -> Result<(Vec<SeqRecord>, Vec<SeqRecord>, usize)> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let mut output = Vec::with_capacity(n);
     let mut valid_seen = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) != pair_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_key(a_id) != pair_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
                 valid_seen += 1;
-                let pair = (
-                    SeqRecord {
-                        id: a.id().to_string(),
-                        desc: a.desc().map(|d| d.to_string()),
-                        seq: a.seq().to_vec(),
-                        qual: Some(a.qual().to_vec()),
-                    },
-                    SeqRecord {
-                        id: b.id().to_string(),
-                        desc: b.desc().map(|d| d.to_string()),
-                        seq: b.seq().to_vec(),
-                        qual: Some(b.qual().to_vec()),
-                    },
-                );
                 if output.len() < n {
-                    output.push(pair);
+                    output.push((a.to_owned_record()?, b.to_owned_record()?));
                 } else if n > 0 {
                     let j = rng.random_range(0..valid_seen);
                     if j < n {
-                        output[j] = pair;
+                        output[j] = (a.to_owned_record()?, b.to_owned_record()?);
                     }
                 }
             }
-            (Some(a), None) => {
+            io::FastqPair::Left(a) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R1: {}", a.id()));
+                    invalid_preview.push(format!("unmatched in R1: {}", a.id_str()?));
                 }
             }
-            (None, Some(b)) => {
+            io::FastqPair::Right(b) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R2: {}", b.id()));
+                    invalid_preview.push(format!("unmatched in R2: {}", b.id_str()?));
                 }
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, allow_unpaired)?;
     let mut out1 = Vec::with_capacity(output.len());
     let mut out2 = Vec::with_capacity(output.len());
@@ -290,7 +228,7 @@ fn pair_key(id: &str) -> &str {
 
 fn sample_rate_streaming(
     args: &SampleArgs,
-    reader: BufReader<Box<dyn std::io::Read>>,
+    reader: io::DynBufReader,
     fmt: SeqFormat,
     rate: f64,
     rng: &mut ChaCha20Rng,
@@ -301,35 +239,16 @@ fn sample_rate_streaming(
     let writer = io::buffered_writer(writer);
     let mut processed = 0usize;
     let mut outputted = 0usize;
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(reader);
-            let mut w = fasta::Writer::new(writer);
-            for rec in fa.records() {
-                let rec = rec?;
-                processed += 1;
-                if rng.random::<f64>() <= rate {
-                    w.write(rec.id(), rec.desc(), rec.seq())?;
-                    outputted += 1;
-                }
-                update_progress(pb);
-            }
+    let mut writer = writer;
+    io::for_each_record_from_reader(reader, fmt, |rec| {
+        processed += 1;
+        if rng.random::<f64>() <= rate {
+            io::write_record_ref(&mut writer, fmt, &rec)?;
+            outputted += 1;
         }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(reader);
-            let mut w = fastq::Writer::new(writer);
-            for rec in fq.records() {
-                let rec = rec?;
-                processed += 1;
-                if rng.random::<f64>() <= rate {
-                    w.write(rec.id(), rec.desc(), rec.seq(), rec.qual())?;
-                    outputted += 1;
-                }
-                update_progress(pb);
-            }
-        }
-        _ => bail!("sample currently supports FASTA/FASTQ input"),
-    }
+        update_progress(pb);
+        Ok(())
+    })?;
     finish_progress(pb);
     if !args.io.quiet {
         eprintln!("[INFO] {processed} sequences processed, {outputted} sequences outputted");
@@ -337,55 +256,53 @@ fn sample_rate_streaming(
     Ok(())
 }
 
-fn reservoir_from_result_iter<T>(
-    items: impl Iterator<Item = Result<T>>,
+fn reservoir_from_reader(
+    reader: io::DynBufReader,
+    fmt: SeqFormat,
     n: usize,
     rng: &mut ChaCha20Rng,
     pb: &Option<ProgressBar>,
-) -> Result<(Vec<T>, usize)> {
+) -> Result<(Vec<SeqRecord>, usize)> {
     if n == 0 {
         return Ok((Vec::new(), 0));
     }
-    let mut items = items;
     let mut out = Vec::with_capacity(n);
     let mut processed = 0usize;
+    let mut w = 0.0f64;
+    let mut gap_remaining = 0usize;
 
-    for _ in 0..n {
-        let Some(item) = items.next() else {
-            return Ok((out, processed));
-        };
-        let item = item?;
+    io::for_each_record_from_reader(reader, fmt, |rec| {
         processed += 1;
-        out.push(item);
-        update_progress(pb);
-    }
-
-    // Vitter's Algorithm L (skip-based reservoir sampling).
-    // This greatly reduces RNG calls on huge inputs where n << total records.
-    let mut w = (sample_open01(rng).ln() / n as f64).exp();
-    loop {
-        let gap = (sample_open01(rng).ln() / (1.0 - w).ln()).floor() as usize;
-        for _ in 0..gap {
-            let Some(item) = items.next() else {
-                return Ok((out, processed));
-            };
-            item?;
-            processed += 1;
+        if out.len() < n {
+            out.push(rec.to_owned_record()?);
             update_progress(pb);
+            if out.len() == n {
+                w = (sample_open01(rng).ln() / n as f64).exp();
+                gap_remaining = sample_gap(w, rng);
+            }
+            return Ok(());
         }
 
-        let Some(item) = items.next() else {
-            return Ok((out, processed));
-        };
-        let item = item?;
-        processed += 1;
+        if gap_remaining > 0 {
+            gap_remaining -= 1;
+            update_progress(pb);
+            return Ok(());
+        }
+
         update_progress(pb);
 
         let j = rng.random_range(0..n);
-        out[j] = item;
+        out[j] = rec.to_owned_record()?;
 
         w *= (sample_open01(rng).ln() / n as f64).exp();
-    }
+        gap_remaining = sample_gap(w, rng);
+        Ok(())
+    })?;
+    Ok((out, processed))
+}
+
+fn sample_gap(w: f64, rng: &mut ChaCha20Rng) -> usize {
+    (sample_open01(rng).ln() / (1.0 - w).ln()).floor() as usize
 }
 
 fn sample_open01(rng: &mut ChaCha20Rng) -> f64 {
