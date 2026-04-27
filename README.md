@@ -4,6 +4,8 @@
 
 ## Installation
 
+Download the latest precompiled binary for your platform from the [GitHub releases page](https://github.com/dawnmy/seqit/releases), or build from source as described below.
+
 ```bash
 cargo build --release
 ./target/release/seqit --help
@@ -283,3 +285,6 @@ seqit tail -i r1.fq -I r2.fq -n 50000 -o t1.fq -O t2.fq
 ```bash
 cargo test
 ```
+
+### Acknowledgment
+The FASTX parser used in `seqit` is based on the implementation from [shenwei356/fastx](https://github.com/shenwei356/fastx).

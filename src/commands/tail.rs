@@ -1,12 +1,13 @@
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 use std::collections::VecDeque;
 
-use crate::{cli::TailArgs, formats::SeqFormat, io, utils};
+use crate::{
+    cli::TailArgs,
+    formats::{SeqFormat, SeqRecord},
+    io, utils,
+};
 
-type FastaParts = (String, Option<String>, Vec<u8>);
-type FastqParts = (String, Option<String>, Vec<u8>, Vec<u8>);
-type PairParts = (FastqParts, FastqParts);
+type PairParts = (SeqRecord, SeqRecord);
 
 pub fn run(args: TailArgs) -> Result<()> {
     let _ = resolve_take(args.num, args.proportion)?;
@@ -52,133 +53,74 @@ fn run_single_tail_streaming(args: &TailArgs, in_path: Option<&str>) -> Result<(
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
     let mut bw = io::buffered_writer(w);
 
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            let mut ring: VecDeque<FastaParts> = VecDeque::with_capacity(mode.initial_capacity());
-            let mut seen = 0usize;
-            for rec in fa.records() {
-                let rec = rec?;
-                seen += 1;
-                push_tail(
-                    &mut ring,
-                    mode,
-                    seen,
-                    (
-                        rec.id().to_string(),
-                        rec.desc().map(|d| d.to_string()),
-                        rec.seq().to_vec(),
-                    ),
-                );
-            }
-            let mut out = fasta::Writer::new(&mut bw);
-            for (id, desc, seq) in ring {
-                out.write(&id, desc.as_deref(), &seq)?;
-            }
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            let mut ring: VecDeque<FastqParts> = VecDeque::with_capacity(mode.initial_capacity());
-            let mut seen = 0usize;
-            for rec in fq.records() {
-                let rec = rec?;
-                seen += 1;
-                push_tail(
-                    &mut ring,
-                    mode,
-                    seen,
-                    (
-                        rec.id().to_string(),
-                        rec.desc().map(|d| d.to_string()),
-                        rec.seq().to_vec(),
-                        rec.qual().to_vec(),
-                    ),
-                );
-            }
-            let mut out = fastq::Writer::new(&mut bw);
-            for (id, desc, seq, qual) in ring {
-                out.write(&id, desc.as_deref(), &seq, &qual)?;
-            }
-        }
-        _ => bail!("tail currently supports FASTA/FASTQ input"),
+    if !matches!(fmt, SeqFormat::Fasta | SeqFormat::Fastq) {
+        bail!("tail currently supports FASTA/FASTQ input");
+    }
+    let mut ring: VecDeque<SeqRecord> = VecDeque::with_capacity(mode.initial_capacity());
+    let mut seen = 0usize;
+    io::for_each_record_from_reader(br, fmt, |rec| {
+        seen += 1;
+        push_tail(&mut ring, mode, seen, rec.to_owned_record()?);
+        Ok(())
+    })?;
+    for rec in ring {
+        io::write_record(&mut bw, fmt, &rec)?;
     }
     Ok(())
 }
 
 fn run_paired_tail_streaming(args: &TailArgs, in1: &str, in2: &str, out2: &str) -> Result<()> {
     let mode = TailMode::from_args(args)?;
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let mut ring: VecDeque<PairParts> = VecDeque::with_capacity(mode.initial_capacity());
     let mut valid_seen = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_key(a.id()) != pair_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_key(a_id) != pair_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
                 valid_seen += 1;
                 push_tail(
                     &mut ring,
                     mode,
                     valid_seen,
-                    (
-                        (
-                            a.id().to_string(),
-                            a.desc().map(|d| d.to_string()),
-                            a.seq().to_vec(),
-                            a.qual().to_vec(),
-                        ),
-                        (
-                            b.id().to_string(),
-                            b.desc().map(|d| d.to_string()),
-                            b.seq().to_vec(),
-                            b.qual().to_vec(),
-                        ),
-                    ),
+                    (a.to_owned_record()?, b.to_owned_record()?),
                 );
             }
-            (Some(a), None) => {
+            io::FastqPair::Left(a) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R1: {}", a.id()));
+                    invalid_preview.push(format!("unmatched in R1: {}", a.id_str()?));
                 }
             }
-            (None, Some(b)) => {
+            io::FastqPair::Right(b) => {
                 invalid_count += 1;
                 if invalid_preview.len() < 10 {
-                    invalid_preview.push(format!("unmatched in R2: {}", b.id()));
+                    invalid_preview.push(format!("unmatched in R2: {}", b.id_str()?));
                 }
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
 
     let w1 = io::open_writer(&args.io.output)?;
     let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
-    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
-    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
-    for ((id1, desc1, seq1, q1), (id2, desc2, seq2, q2)) in ring {
-        w1.write(&id1, desc1.as_deref(), &seq1, &q1)?;
-        w2.write(&id2, desc2.as_deref(), &seq2, &q2)?;
+    let mut w1 = io::buffered_writer(w1);
+    let mut w2 = io::buffered_writer(w2);
+    for (a, b) in ring {
+        io::write_record(&mut w1, SeqFormat::Fastq, &a)?;
+        io::write_record(&mut w2, SeqFormat::Fastq, &b)?;
     }
     Ok(())
 }

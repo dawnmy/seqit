@@ -1,25 +1,30 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::str;
 
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 
 use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
+mod fastx;
+
 pub const BUFFER_SIZE: usize = 1024 * 1024;
 const PARALLEL_GZIP_LEVEL: u32 = 3;
 
-pub fn open_reader(path: Option<&str>) -> Result<Box<dyn Read>> {
-    let reader: Box<dyn Read> = match path {
+pub type DynReader = Box<dyn Read + Send>;
+pub type DynBufReader = BufReader<DynReader>;
+pub type DynWriter = Box<dyn Write>;
+pub type DynSendWriter = Box<dyn Write + Send>;
+
+pub fn open_reader(path: Option<&str>) -> Result<DynReader> {
+    let reader: DynReader = match path {
         None | Some("-") => Box::new(io::stdin()),
         Some(p) => Box::new(File::open(p).with_context(|| format!("failed to open input '{p}'"))?),
     };
     Ok(reader)
 }
-
-type DynWriter = Box<dyn Write>;
-type DynSendWriter = Box<dyn Write + Send>;
 
 pub fn open_writer(path: &str) -> Result<DynSendWriter> {
     let writer: DynSendWriter = if path == "-" {
@@ -30,7 +35,7 @@ pub fn open_writer(path: &str) -> Result<DynSendWriter> {
     Ok(writer)
 }
 
-pub fn buffered_reader(reader: Box<dyn Read>) -> BufReader<Box<dyn Read>> {
+pub fn buffered_reader(reader: DynReader) -> DynBufReader {
     BufReader::with_capacity(BUFFER_SIZE, reader)
 }
 
@@ -39,10 +44,10 @@ pub fn buffered_writer(writer: DynWriter) -> BufWriter<DynWriter> {
 }
 
 pub fn wrap_decompress(
-    reader: Box<dyn Read>,
+    reader: DynReader,
     path: Option<&str>,
     mode: &CompressionArg,
-) -> Result<Box<dyn Read>> {
+) -> Result<DynReader> {
     match detect_compression(path, mode) {
         CompressionArg::Gz => Ok(Box::new(flate2::bufread::MultiGzDecoder::new(
             BufReader::with_capacity(BUFFER_SIZE, reader),
@@ -168,11 +173,7 @@ pub fn read_records(
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
     let br = buffered_reader(r);
-    match format {
-        SeqFormat::Fasta => read_fasta(br),
-        SeqFormat::Fastq => read_fastq(br),
-        _ => bail!("format {:?} not yet implemented for this command", format),
-    }
+    read_records_from_reader(br, format)
 }
 
 pub fn read_record_pair_parallel(
@@ -208,11 +209,7 @@ pub fn read_records_with_format(
         let r = wrap_decompress(r, path, compression)?;
         let mut br = buffered_reader(r);
         let fmt = detect_format_from_bufread(&mut br)?;
-        let recs = match fmt {
-            SeqFormat::Fasta => read_fasta(br)?,
-            SeqFormat::Fastq => read_fastq(br)?,
-            _ => bail!("format {:?} not yet implemented for this command", fmt),
-        };
+        let recs = read_records_from_reader(br, fmt)?;
         return Ok((fmt, recs));
     }
     let fmt = resolve_seq_format(path, format, compression)?;
@@ -224,7 +221,7 @@ pub fn open_seq_reader(
     path: Option<&str>,
     format: &FormatArg,
     compression: &CompressionArg,
-) -> Result<(SeqFormat, BufReader<Box<dyn Read>>)> {
+) -> Result<(SeqFormat, DynBufReader)> {
     let r = open_reader(path)?;
     let r = wrap_decompress(r, path, compression)?;
     let mut br = buffered_reader(r);
@@ -356,42 +353,183 @@ pub fn for_each_record(
     compression: &CompressionArg,
     mut f: impl FnMut(SeqRecord) -> Result<()>,
 ) -> Result<SeqFormat> {
+    for_each_record_ref(path, format, compression, |rec| f(rec.to_owned_record()?))
+}
+
+pub fn for_each_record_ref<F>(
+    path: Option<&str>,
+    format: &FormatArg,
+    compression: &CompressionArg,
+    f: F,
+) -> Result<SeqFormat>
+where
+    F: for<'a> FnMut(SeqRecordRef<'a>) -> Result<()>,
+{
     let (fmt, br) = open_seq_reader(path, format, compression)?;
+    for_each_record_from_reader(br, fmt, f)?;
+    Ok(fmt)
+}
+
+pub(crate) fn for_each_record_from_reader<F>(
+    br: DynBufReader,
+    fmt: SeqFormat,
+    mut f: F,
+) -> Result<()>
+where
+    F: for<'a> FnMut(SeqRecordRef<'a>) -> Result<()>,
+{
+    for_each_record_from_reader_until(br, fmt, |rec| {
+        f(rec)?;
+        Ok(true)
+    })
+}
+
+pub(crate) fn for_each_record_from_reader_until<F>(
+    br: DynBufReader,
+    fmt: SeqFormat,
+    mut f: F,
+) -> Result<()>
+where
+    F: for<'a> FnMut(SeqRecordRef<'a>) -> Result<bool>,
+{
     match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for r in fa.records() {
-                let r = r?;
-                f(SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: None,
-                })?;
-            }
-        }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for r in fq.records() {
-                let r = r?;
-                f(SeqRecord {
-                    id: r.id().to_string(),
-                    desc: r.desc().map(|d| d.to_string()),
-                    seq: r.seq().to_vec(),
-                    qual: Some(r.qual().to_vec()),
-                })?;
+        SeqFormat::Fasta | SeqFormat::Fastq => {
+            let mut reader = fastx::Reader::from_reader(br);
+            while let Some(record) = reader.next()? {
+                if fmt == SeqFormat::Fastq && record.qual.is_none() {
+                    bail!("expected FASTQ input but found FASTA records");
+                }
+                if fmt == SeqFormat::Fasta && record.qual.is_some() {
+                    bail!("expected FASTA input but found FASTQ records");
+                }
+                let rec = SeqRecordRef {
+                    id: record.id,
+                    desc: record.desc,
+                    seq: Cow::Borrowed(record.seq),
+                    qual: record.qual,
+                };
+                if !f(rec)? {
+                    break;
+                }
             }
         }
         _ => bail!("format {:?} not yet implemented for this command", fmt),
     }
-    Ok(fmt)
+    Ok(())
+}
+
+pub(crate) enum FastqPair<'a, 'b> {
+    Both(SeqRecordRef<'a>, SeqRecordRef<'b>),
+    Left(SeqRecordRef<'a>),
+    Right(SeqRecordRef<'b>),
+}
+
+pub(crate) fn for_each_fastq_pair<F>(
+    in1: &str,
+    in2: &str,
+    compression: &CompressionArg,
+    mut f: F,
+) -> Result<()>
+where
+    F: for<'a, 'b> FnMut(FastqPair<'a, 'b>) -> Result<bool>,
+{
+    let r1 = open_reader(Some(in1))?;
+    let r1 = wrap_decompress(r1, Some(in1), compression)?;
+    let r2 = open_reader(Some(in2))?;
+    let r2 = wrap_decompress(r2, Some(in2), compression)?;
+    let mut r1 = fastx::Reader::from_reader(buffered_reader(r1));
+    let mut r2 = fastx::Reader::from_reader(buffered_reader(r2));
+
+    loop {
+        let a = r1.next()?;
+        let b = r2.next()?;
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let a = fastq_record_ref(a)?;
+                let b = fastq_record_ref(b)?;
+                if !f(FastqPair::Both(a, b))? {
+                    break;
+                }
+            }
+            (Some(a), None) => {
+                let a = fastq_record_ref(a)?;
+                if !f(FastqPair::Left(a))? {
+                    break;
+                }
+            }
+            (None, Some(b)) => {
+                let b = fastq_record_ref(b)?;
+                if !f(FastqPair::Right(b))? {
+                    break;
+                }
+            }
+            (None, None) => break,
+        }
+    }
+    Ok(())
+}
+
+fn fastq_record_ref(record: fastx::Record<'_>) -> Result<SeqRecordRef<'_>> {
+    let Some(qual) = record.qual else {
+        bail!("expected FASTQ input but found FASTA records");
+    };
+    Ok(SeqRecordRef {
+        id: record.id,
+        desc: record.desc,
+        seq: Cow::Borrowed(record.seq),
+        qual: Some(qual),
+    })
+}
+
+pub struct SeqRecordRef<'a> {
+    pub id: &'a [u8],
+    pub desc: Option<&'a [u8]>,
+    pub seq: Cow<'a, [u8]>,
+    pub qual: Option<&'a [u8]>,
+}
+
+impl SeqRecordRef<'_> {
+    pub fn id_str(&self) -> Result<&str> {
+        bytes_to_str(self.id, "record id")
+    }
+
+    pub fn desc_str(&self) -> Result<Option<&str>> {
+        self.desc
+            .map(|desc| bytes_to_str(desc, "record description"))
+            .transpose()
+    }
+
+    pub fn to_owned_record(&self) -> Result<SeqRecord> {
+        Ok(SeqRecord {
+            id: bytes_to_str(self.id, "record id")?.to_string(),
+            desc: self
+                .desc
+                .map(|desc| bytes_to_str(desc, "record description").map(str::to_string))
+                .transpose()?,
+            seq: self.seq.to_vec(),
+            qual: self.qual.map(<[u8]>::to_vec),
+        })
+    }
+}
+
+pub fn bytes_to_str<'a>(bytes: &'a [u8], field: &str) -> Result<&'a str> {
+    str::from_utf8(bytes).with_context(|| format!("{field} is not valid UTF-8"))
+}
+
+fn read_records_from_reader(reader: DynBufReader, format: SeqFormat) -> Result<Vec<SeqRecord>> {
+    let mut out = Vec::new();
+    for_each_record_from_reader(reader, format, |rec| {
+        out.push(rec.to_owned_record()?);
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 pub fn write_record(writer: &mut impl Write, format: SeqFormat, rec: &SeqRecord) -> Result<()> {
     match format {
         SeqFormat::Fasta => {
             writer.write_all(b">")?;
-            write_header(writer, rec)?;
+            write_owned_header(writer, rec)?;
             writer.write_all(b"\n")?;
             writer.write_all(&rec.seq)?;
             writer.write_all(b"\n")?;
@@ -401,7 +539,7 @@ pub fn write_record(writer: &mut impl Write, format: SeqFormat, rec: &SeqRecord)
                 bail!("record '{}' missing qualities for FASTQ output", rec.id);
             };
             writer.write_all(b"@")?;
-            write_header(writer, rec)?;
+            write_owned_header(writer, rec)?;
             writer.write_all(b"\n")?;
             writer.write_all(&rec.seq)?;
             writer.write_all(b"\n+\n")?;
@@ -413,7 +551,40 @@ pub fn write_record(writer: &mut impl Write, format: SeqFormat, rec: &SeqRecord)
     Ok(())
 }
 
-fn write_header(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
+pub fn write_record_ref(
+    writer: &mut impl Write,
+    format: SeqFormat,
+    rec: &SeqRecordRef<'_>,
+) -> Result<()> {
+    match format {
+        SeqFormat::Fasta => {
+            writer.write_all(b">")?;
+            write_header_bytes(writer, rec.id, rec.desc)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n")?;
+        }
+        SeqFormat::Fastq => {
+            let Some(q) = rec.qual else {
+                bail!(
+                    "record '{}' missing qualities for FASTQ output",
+                    rec.id_str()?
+                );
+            };
+            writer.write_all(b"@")?;
+            write_header_bytes(writer, rec.id, rec.desc)?;
+            writer.write_all(b"\n")?;
+            writer.write_all(&rec.seq)?;
+            writer.write_all(b"\n+\n")?;
+            writer.write_all(q)?;
+            writer.write_all(b"\n")?;
+        }
+        _ => bail!("format {:?} not yet implemented for this command", format),
+    }
+    Ok(())
+}
+
+fn write_owned_header(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
     writer.write_all(rec.id.as_bytes())?;
     if let Some(desc) = &rec.desc {
         writer.write_all(b" ")?;
@@ -422,32 +593,11 @@ fn write_header(writer: &mut impl Write, rec: &SeqRecord) -> Result<()> {
     Ok(())
 }
 
-fn read_fasta(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
-    let mut out = Vec::new();
-    let fa = fasta::Reader::new(reader);
-    for r in fa.records() {
-        let r = r?;
-        out.push(SeqRecord {
-            id: r.id().to_string(),
-            desc: r.desc().map(|d| d.to_string()),
-            seq: r.seq().to_vec(),
-            qual: None,
-        });
+pub fn write_header_bytes(writer: &mut impl Write, id: &[u8], desc: Option<&[u8]>) -> Result<()> {
+    writer.write_all(id)?;
+    if let Some(desc) = desc {
+        writer.write_all(b" ")?;
+        writer.write_all(desc)?;
     }
-    Ok(out)
-}
-
-fn read_fastq(reader: impl BufRead) -> Result<Vec<SeqRecord>> {
-    let mut out = Vec::new();
-    let fq = fastq::Reader::new(reader);
-    for r in fq.records() {
-        let r = r?;
-        out.push(SeqRecord {
-            id: r.id().to_string(),
-            desc: r.desc().map(|d| d.to_string()),
-            seq: r.seq().to_vec(),
-            qual: Some(r.qual().to_vec()),
-        });
-    }
-    Ok(out)
+    Ok(())
 }

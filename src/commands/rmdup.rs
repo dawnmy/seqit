@@ -1,6 +1,5 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{bail, Context, Result};
-use bio::io::{fasta, fastq};
 use std::collections::hash_map::Entry;
 
 use crate::{
@@ -40,39 +39,12 @@ fn run_single_keep_first_streaming(args: &RmdupArgs, in_path: Option<&str>) -> R
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
     let mut out = io::buffered_writer(w);
     let mut seen = AHashSet::new();
-    match fmt {
-        SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for rec in fa.records() {
-                let rec = rec?;
-                let seq_rec = SeqRecord {
-                    id: rec.id().to_string(),
-                    desc: rec.desc().map(|d| d.to_string()),
-                    seq: rec.seq().to_vec(),
-                    qual: None,
-                };
-                if seen.insert(single_key(&seq_rec, &args.by)) {
-                    io::write_record(&mut out, fmt, &seq_rec)?;
-                }
-            }
+    io::for_each_record_from_reader(br, fmt, |rec| {
+        if seen.insert(single_key_ref(&rec, &args.by)?) {
+            io::write_record_ref(&mut out, fmt, &rec)?;
         }
-        SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for rec in fq.records() {
-                let rec = rec?;
-                let seq_rec = SeqRecord {
-                    id: rec.id().to_string(),
-                    desc: rec.desc().map(|d| d.to_string()),
-                    seq: rec.seq().to_vec(),
-                    qual: Some(rec.qual().to_vec()),
-                };
-                if seen.insert(single_key(&seq_rec, &args.by)) {
-                    io::write_record(&mut out, fmt, &seq_rec)?;
-                }
-            }
-        }
-        _ => bail!("rmdup currently supports FASTA/FASTQ input"),
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -108,115 +80,87 @@ fn run_paired_keep_first_streaming(
     in2: &str,
     out2: &str,
 ) -> Result<()> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let w1 = io::open_writer(&args.io.output)?;
     let w1 = io::wrap_compress_for_streams(w1, &args.io.output, &args.io.compression, 2)?;
     let w2 = io::open_writer(out2)?;
     let w2 = io::wrap_compress_for_streams(w2, out2, &args.io.compression, 2)?;
-    let mut w1 = fastq::Writer::new(io::buffered_writer(w1));
-    let mut w2 = fastq::Writer::new(io::buffered_writer(w2));
+    let mut w1 = io::buffered_writer(w1);
+    let mut w2 = io::buffered_writer(w2);
 
     let mut seen = AHashSet::new();
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_id_key(a.id()) != pair_id_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_id_key(a_id) != pair_id_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
-                if seen.insert(pair_key_from_fastq(&a, &b, &args.by)) {
-                    w1.write(a.id(), a.desc(), a.seq(), a.qual())?;
-                    w2.write(b.id(), b.desc(), b.seq(), b.qual())?;
+                if seen.insert(pair_key_ref(&a, &b, &args.by)?) {
+                    io::write_record_ref(&mut w1, SeqFormat::Fastq, &a)?;
+                    io::write_record_ref(&mut w2, SeqFormat::Fastq, &b)?;
                 }
             }
-            (Some(a), None) => {
-                record_unmatched(&mut invalid_count, &mut invalid_preview, "R1", a.id())
+            io::FastqPair::Left(a) => {
+                record_unmatched(&mut invalid_count, &mut invalid_preview, "R1", a.id_str()?)
             }
-            (None, Some(b)) => {
-                record_unmatched(&mut invalid_count, &mut invalid_preview, "R2", b.id())
+            io::FastqPair::Right(b) => {
+                record_unmatched(&mut invalid_count, &mut invalid_preview, "R2", b.id_str()?)
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)
 }
 
 fn run_paired_map(args: &RmdupArgs, in1: &str, in2: &str, out2: &str) -> Result<()> {
-    let r1 = io::open_reader(Some(in1))?;
-    let r1 = io::wrap_decompress(r1, Some(in1), &args.io.compression)?;
-    let r2 = io::open_reader(Some(in2))?;
-    let r2 = io::wrap_decompress(r2, Some(in2), &args.io.compression)?;
-    let fq1 = fastq::Reader::new(io::buffered_reader(r1));
-    let fq2 = fastq::Reader::new(io::buffered_reader(r2));
-    let mut it1 = fq1.records();
-    let mut it2 = fq2.records();
-
     let mut map: AHashMap<PairKey, (SeqRecord, SeqRecord, usize)> = AHashMap::new();
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
-    loop {
-        let a = it1.next().transpose()?;
-        let b = it2.next().transpose()?;
-        match (a, b) {
-            (Some(a), Some(b)) => {
-                if pair_id_key(a.id()) != pair_id_key(b.id()) {
+    io::for_each_fastq_pair(in1, in2, &args.io.compression, |pair| {
+        match pair {
+            io::FastqPair::Both(a, b) => {
+                let a_id = a.id_str()?;
+                let b_id = b.id_str()?;
+                if pair_id_key(a_id) != pair_id_key(b_id) {
                     invalid_count += 1;
                     if invalid_preview.len() < 10 {
-                        invalid_preview.push(format!("R1={} R2={}", a.id(), b.id()));
+                        invalid_preview.push(format!("R1={a_id} R2={b_id}"));
                     }
-                    continue;
+                    return Ok(true);
                 }
-                let left = SeqRecord {
-                    id: a.id().to_string(),
-                    desc: a.desc().map(|d| d.to_string()),
-                    seq: a.seq().to_vec(),
-                    qual: Some(a.qual().to_vec()),
-                };
-                let right = SeqRecord {
-                    id: b.id().to_string(),
-                    desc: b.desc().map(|d| d.to_string()),
-                    seq: b.seq().to_vec(),
-                    qual: Some(b.qual().to_vec()),
-                };
-                let key = pair_key(&left, &right, &args.by);
+                let key = pair_key_ref(&a, &b, &args.by)?;
                 match map.entry(key) {
                     Entry::Vacant(entry) => {
+                        let left = a.to_owned_record()?;
+                        let right = b.to_owned_record()?;
                         entry.insert((left, right, 1));
                     }
                     Entry::Occupied(mut entry) => {
                         let value = entry.get_mut();
                         value.2 += 1;
                         if args.keep_last {
-                            value.0 = left;
-                            value.1 = right;
+                            value.0 = a.to_owned_record()?;
+                            value.1 = b.to_owned_record()?;
                         }
                     }
                 }
             }
-            (Some(a), None) => {
-                record_unmatched(&mut invalid_count, &mut invalid_preview, "R1", a.id())
+            io::FastqPair::Left(a) => {
+                record_unmatched(&mut invalid_count, &mut invalid_preview, "R1", a.id_str()?)
             }
-            (None, Some(b)) => {
-                record_unmatched(&mut invalid_count, &mut invalid_preview, "R2", b.id())
+            io::FastqPair::Right(b) => {
+                record_unmatched(&mut invalid_count, &mut invalid_preview, "R2", b.id_str()?)
             }
-            (None, None) => break,
         }
-    }
+        Ok(true)
+    })?;
     report_invalid_pairs(invalid_count, invalid_preview, args.allow_unpaired)?;
 
     let mut o1 = Vec::with_capacity(map.len());
@@ -265,34 +209,31 @@ fn single_key(r: &SeqRecord, by: &DupBy) -> SingleKey {
     }
 }
 
-fn pair_key(a: &SeqRecord, b: &SeqRecord, by: &DupBy) -> PairKey {
-    match by {
-        DupBy::Id => PairKey::Id(a.id.clone(), b.id.clone()),
-        DupBy::Seq => PairKey::Seq(a.seq.clone(), b.seq.clone()),
-        DupBy::Full => PairKey::Full(
-            a.id.clone(),
-            b.id.clone(),
-            a.seq.clone(),
-            b.seq.clone(),
-            a.qual.clone(),
-            b.qual.clone(),
+fn single_key_ref(r: &io::SeqRecordRef<'_>, by: &DupBy) -> Result<SingleKey> {
+    Ok(match by {
+        DupBy::Id => SingleKey::Id(r.id_str()?.to_string()),
+        DupBy::Seq => SingleKey::Seq(r.seq.to_vec()),
+        DupBy::Full => SingleKey::Full(
+            r.id_str()?.to_string(),
+            r.seq.to_vec(),
+            r.qual.map(<[u8]>::to_vec),
         ),
-    }
+    })
 }
 
-fn pair_key_from_fastq(a: &fastq::Record, b: &fastq::Record, by: &DupBy) -> PairKey {
-    match by {
-        DupBy::Id => PairKey::Id(a.id().to_string(), b.id().to_string()),
-        DupBy::Seq => PairKey::Seq(a.seq().to_vec(), b.seq().to_vec()),
+fn pair_key_ref(a: &io::SeqRecordRef<'_>, b: &io::SeqRecordRef<'_>, by: &DupBy) -> Result<PairKey> {
+    Ok(match by {
+        DupBy::Id => PairKey::Id(a.id_str()?.to_string(), b.id_str()?.to_string()),
+        DupBy::Seq => PairKey::Seq(a.seq.to_vec(), b.seq.to_vec()),
         DupBy::Full => PairKey::Full(
-            a.id().to_string(),
-            b.id().to_string(),
-            a.seq().to_vec(),
-            b.seq().to_vec(),
-            Some(a.qual().to_vec()),
-            Some(b.qual().to_vec()),
+            a.id_str()?.to_string(),
+            b.id_str()?.to_string(),
+            a.seq.to_vec(),
+            b.seq.to_vec(),
+            a.qual.map(<[u8]>::to_vec),
+            b.qual.map(<[u8]>::to_vec),
         ),
-    }
+    })
 }
 
 fn annotate_id(id: &mut String, count: usize, args: &RmdupArgs) {

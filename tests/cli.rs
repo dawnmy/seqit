@@ -61,6 +61,28 @@ fn seq_auto_detects_format_from_stdin_content() {
 }
 
 #[test]
+fn seq_accepts_wrapped_fastq_records() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", "--format", "fastq"])
+        .write_stdin("@r1 desc\nAC\nGT\n+\nII\nII\n")
+        .assert()
+        .success()
+        .stdout(contains("@r1 desc\nACGT\n+\nIIII\n"));
+}
+
+#[test]
+fn fq2fa_accepts_wrapped_fastq_records() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["fq2fa", "--format", "fastq"])
+        .write_stdin("@r1 desc\nAC\nGT\n+\nII\nII\n")
+        .assert()
+        .success()
+        .stdout(contains(">r1 desc\nACGT\n"));
+}
+
+#[test]
 fn seq_writes_readable_parallel_gzip_output() {
     let td = tempdir().unwrap();
     let out = td.path().join("out.fq.gz");
@@ -364,6 +386,17 @@ fn stats_rejects_fastq_quality_length_mismatch() {
         .assert()
         .failure()
         .stderr(contains("quality length"));
+}
+
+#[test]
+fn stats_accepts_wrapped_fastq_with_length_based_quality() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "-", "--format", "fastq", "-T"])
+        .write_stdin("@r1\nAC\nGT\n+\nIIII\n")
+        .assert()
+        .success()
+        .stdout(contains("-\tfastq\tDNA\t1\t4\t4\t4"));
 }
 
 #[test]

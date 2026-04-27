@@ -2,7 +2,7 @@ use crate::cli::Fq2faArgs;
 use crate::formats::SeqFormat;
 use crate::io;
 use anyhow::{bail, Result};
-use bio::io::{fasta, fastq};
+use std::io::Write;
 
 pub fn run(args: Fq2faArgs) -> Result<()> {
     let in_path = args.io.input.as_deref();
@@ -11,13 +11,17 @@ pub fn run(args: Fq2faArgs) -> Result<()> {
         bail!("fq2fa requires FASTQ input");
     }
 
-    let fq = fastq::Reader::new(reader);
     let w = io::open_writer(&args.io.output)?;
     let w = io::wrap_compress(w, &args.io.output, &args.io.compression)?;
-    let mut fa = fasta::Writer::new(io::buffered_writer(w));
-    for rec in fq.records() {
-        let rec = rec?;
-        fa.write(rec.id(), rec.desc(), rec.seq())?;
-    }
+    let mut out = io::buffered_writer(w);
+    io::for_each_record_from_reader(reader, fmt, |rec| {
+        out.write_all(b">")?;
+        io::write_header_bytes(&mut out, rec.id, rec.desc)?;
+        out.write_all(b"\n")?;
+        out.write_all(&rec.seq)?;
+        out.write_all(b"\n")?;
+        Ok(())
+    })?;
+    out.flush()?;
     Ok(())
 }

@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::{bail, Result};
-use bio::io::{fasta, fastq};
 use regex::{Regex, RegexBuilder};
 
 use crate::cli::LocateArgs;
@@ -39,39 +38,23 @@ pub fn run(args: LocateArgs) -> Result<()> {
     let out = io::open_writer(&args.io.output)?;
     let out = io::wrap_compress(out, &args.io.output, &args.io.compression)?;
     let mut out = io::buffered_writer(out);
-    match fmt {
-        crate::formats::SeqFormat::Fasta => {
-            let fa = fasta::Reader::new(br);
-            for r in fa.records() {
-                let r = r?;
-                locate_in_record(
-                    r.id(),
-                    r.seq(),
-                    &pats,
-                    regexes.as_deref(),
-                    normalized_pats.as_deref(),
-                    &args,
-                    &mut out,
-                )?;
-            }
-        }
-        crate::formats::SeqFormat::Fastq => {
-            let fq = fastq::Reader::new(br);
-            for r in fq.records() {
-                let r = r?;
-                locate_in_record(
-                    r.id(),
-                    r.seq(),
-                    &pats,
-                    regexes.as_deref(),
-                    normalized_pats.as_deref(),
-                    &args,
-                    &mut out,
-                )?;
-            }
-        }
-        _ => bail!("locate currently supports FASTA/FASTQ input"),
+    if !matches!(
+        fmt,
+        crate::formats::SeqFormat::Fasta | crate::formats::SeqFormat::Fastq
+    ) {
+        bail!("locate currently supports FASTA/FASTQ input");
     }
+    io::for_each_record_from_reader(br, fmt, |rec| {
+        locate_in_record(
+            rec.id_str()?,
+            &rec.seq,
+            &pats,
+            regexes.as_deref(),
+            normalized_pats.as_deref(),
+            &args,
+            &mut out,
+        )
+    })?;
     out.flush()?;
     Ok(())
 }
