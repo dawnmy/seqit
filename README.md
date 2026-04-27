@@ -1,6 +1,6 @@
 # seqit
 
-`seqit` is a streaming-first Rust CLI toolkit for practical FASTA/FASTQ sequence-file operations in production pipelines.
+`seqit` is a streaming-first Rust CLI toolkit for practical FASTA/FASTQ sequence-file operations in production pipelines. It has a similar interface to `seqkit`, but extends support for paired-end data and speeds up the `sample` command and multi-file `stats`.
 
 ## Installation
 
