@@ -14,7 +14,7 @@ mod fastx;
 use aligned::AlignedBufReader;
 
 pub const BUFFER_SIZE: usize = 1024 * 1024;
-const BUFFER_ALIGNMENT: usize = 64;
+const BUFFER_ALIGNMENT: usize = 4096;
 const PARALLEL_GZIP_LEVEL: u32 = 3;
 
 pub type DynReader = Box<dyn Read + Send>;
