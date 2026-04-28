@@ -262,6 +262,108 @@ fn sample_paired_num_streaming_runs() {
 }
 
 #[test]
+fn sample_single_and_paired_choose_same_first_mates_with_same_seed() {
+    let td = tempdir().unwrap();
+    let r1 = td.path().join("r1.fq");
+    let r2 = td.path().join("r2.fq");
+    fs::write(&r1, numbered_fastq(12, "/1")).unwrap();
+    fs::write(&r2, numbered_fastq(12, "/2")).unwrap();
+
+    let single = td.path().join("single.fq");
+    let paired1 = td.path().join("paired1.fq");
+    let paired2 = td.path().join("paired2.fq");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sample",
+            r1.to_str().unwrap(),
+            "-n",
+            "5",
+            "-s",
+            "17",
+            "-o",
+            single.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "sample",
+            "-i",
+            r1.to_str().unwrap(),
+            "-I",
+            r2.to_str().unwrap(),
+            "-n",
+            "5",
+            "-s",
+            "17",
+            "-o",
+            paired1.to_str().unwrap(),
+            "-O",
+            paired2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(single).unwrap(),
+        fs::read_to_string(paired1).unwrap()
+    );
+}
+
+#[test]
+fn shuffle_single_and_paired_apply_same_first_mate_permutation() {
+    let td = tempdir().unwrap();
+    let r1 = td.path().join("r1.fq");
+    let r2 = td.path().join("r2.fq");
+    fs::write(&r1, numbered_fastq(12, "/1")).unwrap();
+    fs::write(&r2, numbered_fastq(12, "/2")).unwrap();
+
+    let single = td.path().join("single.fq");
+    let paired1 = td.path().join("paired1.fq");
+    let paired2 = td.path().join("paired2.fq");
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "shuffle",
+            r1.to_str().unwrap(),
+            "-s",
+            "17",
+            "-o",
+            single.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "shuffle",
+            "-i",
+            r1.to_str().unwrap(),
+            "-I",
+            r2.to_str().unwrap(),
+            "-s",
+            "17",
+            "-o",
+            paired1.to_str().unwrap(),
+            "-O",
+            paired2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(single).unwrap(),
+        fs::read_to_string(paired1).unwrap()
+    );
+}
+
+#[test]
 fn sample_rejects_partial_paired_flags() {
     Command::cargo_bin("seqit")
         .unwrap()
@@ -269,6 +371,14 @@ fn sample_rejects_partial_paired_flags() {
         .assert()
         .failure()
         .stderr(contains("paired-end mode requires both read files"));
+}
+
+fn numbered_fastq(n: usize, suffix: &str) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!("@r{i}{suffix}\nACGT\n+\nIIII\n"));
+    }
+    out
 }
 
 #[test]
@@ -506,6 +616,24 @@ fn stats_supports_bam_input() {
         .assert()
         .success()
         .stdout(contains("bam"));
+}
+
+#[test]
+fn stats_sam_gz_reports_sequence_metrics() {
+    let td = tempdir().unwrap();
+    let sam_path = td.path().join("tiny.sam.gz");
+    let sam =
+        b"@HD\tVN:1.6\nr1\t0\t*\t0\t0\t*\t*\t0\t0\tACGTNN\tIIIIII\nr2\t0\t*\t0\t0\t*\t*\t0\t0\tGGCC\tHHHH\n";
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(sam).unwrap();
+    fs::write(&sam_path, encoder.finish().unwrap()).unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", sam_path.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tsam\tDNA\t2\t10\t4\t6\t5.000\t60.000\t6"));
 }
 
 #[test]

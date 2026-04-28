@@ -1,5 +1,5 @@
 use ahash::AHashMap;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read};
@@ -231,22 +231,29 @@ pub fn run(args: StatsArgs) -> Result<()> {
 }
 
 fn build_row(p: &str, args: &StatsArgs) -> Result<StatRow> {
+    let compute_quality = args.all || args.json;
     if p == "-" && matches!(args.format, crate::cli::FormatArg::Auto) {
-        return build_seq_row_streaming(p, &args.format);
+        return build_seq_row_streaming(p, &args.format, compute_quality);
     }
     let fmt = SeqFormat::from_arg_or_detect(&args.format, Some(p))?;
     match fmt {
-        SeqFormat::Fasta | SeqFormat::Fastq => build_seq_row_streaming(p, &args.format),
-        SeqFormat::Sam => build_sam_row_streaming(p),
-        SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt, args.threads),
+        SeqFormat::Fasta | SeqFormat::Fastq => {
+            build_seq_row_streaming(p, &args.format, compute_quality)
+        }
+        SeqFormat::Sam => build_sam_row_streaming(p, compute_quality),
+        SeqFormat::Bam | SeqFormat::Cram => build_hts_row(p, fmt, args.threads, compute_quality),
     }
 }
 
-fn build_seq_row_streaming(file: &str, format_arg: &crate::cli::FormatArg) -> Result<StatRow> {
+fn build_seq_row_streaming(
+    file: &str,
+    format_arg: &crate::cli::FormatArg,
+    compute_quality: bool,
+) -> Result<StatRow> {
     let (fmt, br) = io::open_seq_reader(Some(file), format_arg, &crate::cli::CompressionArg::Auto)?;
     match fmt {
         SeqFormat::Fasta => build_fasta_row(file, br),
-        SeqFormat::Fastq => build_fastq_row(file, br),
+        SeqFormat::Fastq => build_fastq_row(file, br, compute_quality),
         _ => unreachable!("open_seq_reader only resolves fasta/fastq for stats sequence path"),
     }
 }
@@ -256,18 +263,18 @@ fn build_fasta_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut lens = LenDist::default();
     let mut n_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut in_record = false;
     let mut current_len = 0usize;
     let mut current_gc = 0usize;
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line)?;
+        let n = reader.read_until(b'\n', &mut line)?;
         if n == 0 {
             break;
         }
-        let bytes = trim_line_ending(line.as_bytes());
+        let bytes = trim_line_ending(&line);
         if bytes.starts_with(b">") {
             if in_record {
                 acc = acc.merge(SeqAcc::with_record(current_len, current_gc));
@@ -303,7 +310,7 @@ fn build_fasta_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     )
 }
 
-fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
+fn build_fastq_row(file: &str, mut reader: impl BufRead, compute_quality: bool) -> Result<StatRow> {
     let mut acc = SeqAcc::new();
     let mut lens = LenDist::default();
     let mut n_bases = 0usize;
@@ -312,15 +319,15 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
     let mut q_ge_30 = 0usize;
     let mut qual_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
-    let mut line = String::new();
+    let mut line = Vec::new();
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line)?;
+        let n = reader.read_until(b'\n', &mut line)?;
         if n == 0 {
             break;
         }
-        if !line.starts_with('@') {
+        if !trim_line_ending(&line).starts_with(b"@") {
             bail!("FASTQ record in '{file}' does not start with '@'");
         }
 
@@ -329,13 +336,13 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
         let mut saw_sequence = false;
         loop {
             line.clear();
-            if reader.read_line(&mut line)? == 0 {
+            if reader.read_until(b'\n', &mut line)? == 0 {
                 bail!("incomplete FASTQ record in '{file}': missing '+' separator");
             }
-            if line.starts_with('+') {
+            if trim_line_ending(&line).starts_with(b"+") {
                 break;
             }
-            let bytes = trim_line_ending(line.as_bytes());
+            let bytes = trim_line_ending(&line);
             let metrics = seq_line_metrics(bytes);
             seq_len += metrics.len;
             seq_gc += metrics.gc;
@@ -350,7 +357,7 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
         let mut qual_len = 0usize;
         while qual_len < seq_len {
             line.clear();
-            if reader.read_line(&mut line)? == 0 {
+            if reader.read_until(b'\n', &mut line)? == 0 {
                 if qual_len > 0 {
                     bail!(
                         "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
@@ -358,25 +365,27 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
                 }
                 bail!("incomplete FASTQ record in '{file}': missing qualities");
             }
-            let qual = trim_line_ending(line.as_bytes());
+            let qual = trim_line_ending(&line);
             qual_len += qual.len();
             if qual_len > seq_len {
                 bail!(
                     "FASTQ record in '{file}' has sequence length {seq_len} but quality length {qual_len}"
                 );
             }
-            for q in qual.iter().copied() {
-                let phred = q.saturating_sub(33);
-                if phred >= 10 {
-                    q_ge_10 += 1;
+            if compute_quality {
+                for q in qual.iter().copied() {
+                    let phred = q.saturating_sub(33);
+                    if phred >= 10 {
+                        q_ge_10 += 1;
+                    }
+                    if phred >= 20 {
+                        q_ge_20 += 1;
+                    }
+                    if phred >= 30 {
+                        q_ge_30 += 1;
+                    }
+                    qual_bases += 1;
                 }
-                if phred >= 20 {
-                    q_ge_20 += 1;
-                }
-                if phred >= 30 {
-                    q_ge_30 += 1;
-                }
-                qual_bases += 1;
             }
         }
         if qual_len != seq_len {
@@ -389,11 +398,15 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
         lens.add(seq_len);
     }
 
-    let q_pcts = (
-        Some(calc_pct(q_ge_10, qual_bases)),
-        Some(calc_pct(q_ge_20, qual_bases)),
-        Some(calc_pct(q_ge_30, qual_bases)),
-    );
+    let q_pcts = if compute_quality {
+        (
+            Some(calc_pct(q_ge_10, qual_bases)),
+            Some(calc_pct(q_ge_20, qual_bases)),
+            Some(calc_pct(q_ge_30, qual_bases)),
+        )
+    } else {
+        (None, None, None)
+    };
     finalize_seq_row(
         file,
         SeqFormat::Fastq,
@@ -454,40 +467,112 @@ fn finalize_seq_row(
     })
 }
 
-fn build_sam_row_streaming(p: &str) -> Result<StatRow> {
+fn build_sam_row_streaming(p: &str, compute_quality: bool) -> Result<StatRow> {
     let r = io::open_reader(Some(p))?;
     let r = io::wrap_decompress(r, Some(p), &crate::cli::CompressionArg::Auto)?;
-    let br = io::buffered_reader(r);
-    let mut records = 0usize;
-    for line in br.lines() {
-        let line = line?;
-        if !line.starts_with('@') {
-            records += 1;
+    let mut br = io::buffered_reader(r);
+    let mut acc = SeqAcc::new();
+    let mut lens = LenDist::default();
+    let mut n_bases = 0usize;
+    let mut q_ge_10 = 0usize;
+    let mut q_ge_20 = 0usize;
+    let mut q_ge_30 = 0usize;
+    let mut qual_bases = 0usize;
+    let mut type_counts = SeqTypeCounts::default();
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        if br.read_until(b'\n', &mut line)? == 0 {
+            break;
         }
+        let bytes = trim_line_ending(&line);
+        if bytes.is_empty() || bytes.starts_with(b"@") {
+            continue;
+        }
+        let (seq_field, qual_field) = sam_seq_qual_fields(bytes)
+            .with_context(|| format!("SAM record in '{p}' has fewer than 11 fields"))?;
+        let seq = if seq_field == b"*" {
+            &[][..]
+        } else {
+            seq_field
+        };
+        let len = seq.len();
+        let metrics = seq_line_metrics(seq);
+        n_bases += metrics.n;
+        update_seq_type_counts_from_metrics(metrics, &mut type_counts);
+
+        if qual_field != b"*" {
+            if qual_field.len() != len {
+                bail!(
+                    "SAM record in '{p}' has sequence length {len} but quality length {}",
+                    qual_field.len()
+                );
+            }
+            if compute_quality {
+                for q in qual_field.iter().copied() {
+                    let phred = q.saturating_sub(33);
+                    if phred >= 10 {
+                        q_ge_10 += 1;
+                    }
+                    if phred >= 20 {
+                        q_ge_20 += 1;
+                    }
+                    if phred >= 30 {
+                        q_ge_30 += 1;
+                    }
+                    qual_bases += 1;
+                }
+            }
+        }
+        acc = acc.merge(SeqAcc::with_record(len, metrics.gc));
+        lens.add(len);
     }
-    Ok(StatRow {
-        file: p.to_string(),
-        format: "sam".into(),
-        seq_type: "NA".into(),
-        records,
-        total_bases: 0,
-        min_len: 0,
-        max_len: 0,
-        mean_len: 0.0,
-        gc_pct: 0.0,
-        n50: 0,
-        l50: 0,
-        q1_len: 0,
-        median_len: 0,
-        q3_len: 0,
-        n_pct: 0.0,
-        q10_pct: None,
-        q20_pct: None,
-        q30_pct: None,
-    })
+
+    let q_pcts = if compute_quality {
+        (
+            Some(calc_pct(q_ge_10, qual_bases)),
+            Some(calc_pct(q_ge_20, qual_bases)),
+            Some(calc_pct(q_ge_30, qual_bases)),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    finalize_seq_row(p, SeqFormat::Sam, acc, lens, n_bases, q_pcts, type_counts)
 }
 
-fn build_hts_row(p: &str, fmt: SeqFormat, threads: Option<usize>) -> Result<StatRow> {
+fn sam_seq_qual_fields(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut field_idx = 0usize;
+    let mut field_start = 0usize;
+    let mut seq = None;
+
+    for (idx, &byte) in line.iter().enumerate() {
+        if byte != b'\t' {
+            continue;
+        }
+        if field_idx == 9 {
+            seq = Some(&line[field_start..idx]);
+        } else if field_idx == 10 {
+            return seq.map(|seq| (seq, &line[field_start..idx]));
+        }
+        field_idx += 1;
+        field_start = idx + 1;
+    }
+
+    if field_idx == 10 {
+        seq.map(|seq| (seq, &line[field_start..]))
+    } else {
+        None
+    }
+}
+
+fn build_hts_row(
+    p: &str,
+    fmt: SeqFormat,
+    threads: Option<usize>,
+    compute_quality: bool,
+) -> Result<StatRow> {
     let mut reader = bam::Reader::from_path(p)?;
     if let Some(threads) = threads.filter(|&t| t > 1) {
         reader.set_threads(threads)?;
@@ -519,18 +604,20 @@ fn build_hts_row(p: &str, fmt: SeqFormat, threads: Option<usize>) -> Result<Stat
             + bytecount::count(&seq, b'c');
         n_bases += bytecount::count(&seq, b'N') + bytecount::count(&seq, b'n');
         update_seq_type_counts(&seq, &mut type_counts);
-        for q in rec.qual().iter().copied() {
-            let phred = q;
-            if phred >= 10 {
-                q_ge_10 += 1;
+        if compute_quality {
+            for q in rec.qual().iter().copied() {
+                let phred = q;
+                if phred >= 10 {
+                    q_ge_10 += 1;
+                }
+                if phred >= 20 {
+                    q_ge_20 += 1;
+                }
+                if phred >= 30 {
+                    q_ge_30 += 1;
+                }
+                qual_bases += 1;
             }
-            if phred >= 20 {
-                q_ge_20 += 1;
-            }
-            if phred >= 30 {
-                q_ge_30 += 1;
-            }
-            qual_bases += 1;
         }
         lens.add(len);
     }
@@ -569,9 +656,9 @@ fn build_hts_row(p: &str, fmt: SeqFormat, threads: Option<usize>) -> Result<Stat
         } else {
             0.0
         },
-        q10_pct: Some(calc_pct(q_ge_10, qual_bases)),
-        q20_pct: Some(calc_pct(q_ge_20, qual_bases)),
-        q30_pct: Some(calc_pct(q_ge_30, qual_bases)),
+        q10_pct: compute_quality.then_some(calc_pct(q_ge_10, qual_bases)),
+        q20_pct: compute_quality.then_some(calc_pct(q_ge_20, qual_bases)),
+        q30_pct: compute_quality.then_some(calc_pct(q_ge_30, qual_bases)),
     })
 }
 
