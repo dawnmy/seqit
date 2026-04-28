@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
+#[cfg(feature = "hts")]
 use rust_htslib::bam;
 use std::fs;
 use std::io::Write;
@@ -592,6 +593,7 @@ fn stats_all_mode_shows_na_for_mixed_assembly_and_read_only_metrics() {
         .stdout(contains("fasta"));
 }
 
+#[cfg(feature = "hts")]
 #[test]
 fn stats_supports_bam_input() {
     let td = tempdir().unwrap();
@@ -616,6 +618,17 @@ fn stats_supports_bam_input() {
         .assert()
         .success()
         .stdout(contains("bam"));
+}
+
+#[cfg(not(feature = "hts"))]
+#[test]
+fn stats_bam_requires_hts_feature() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", "reads.bam", "-T"])
+        .assert()
+        .failure()
+        .stderr(contains("requires seqit built with BAM/CRAM support"));
 }
 
 #[test]

@@ -2,6 +2,7 @@ use ahash::AHashMap;
 use anyhow::{bail, Context, Result};
 use num_format::{Locale, ToFormattedString};
 use rayon::prelude::*;
+#[cfg(feature = "hts")]
 use rust_htslib::bam::{self, Read};
 use serde::Serialize;
 use std::io::BufRead;
@@ -567,6 +568,7 @@ fn sam_seq_qual_fields(line: &[u8]) -> Option<(&[u8], &[u8])> {
     }
 }
 
+#[cfg(feature = "hts")]
 fn build_hts_row(
     p: &str,
     fmt: SeqFormat,
@@ -660,6 +662,19 @@ fn build_hts_row(
         q20_pct: compute_quality.then_some(calc_pct(q_ge_20, qual_bases)),
         q30_pct: compute_quality.then_some(calc_pct(q_ge_30, qual_bases)),
     })
+}
+
+#[cfg(not(feature = "hts"))]
+fn build_hts_row(
+    p: &str,
+    fmt: SeqFormat,
+    _threads: Option<usize>,
+    _compute_quality: bool,
+) -> Result<StatRow> {
+    bail!(
+        "{} input '{p}' requires seqit built with BAM/CRAM support: cargo build --release --features hts",
+        format!("{:?}", fmt).to_lowercase()
+    )
 }
 
 fn aggregate_row(rows: &[StatRow]) -> StatRow {
@@ -973,6 +988,7 @@ fn update_seq_type_counts_from_metrics(metrics: SeqLineMetrics, counts: &mut Seq
     counts.t += metrics.t;
 }
 
+#[cfg(feature = "hts")]
 fn update_seq_type_counts(seq: &[u8], counts: &mut SeqTypeCounts) {
     for &b in seq {
         if !b.is_ascii_alphabetic() {

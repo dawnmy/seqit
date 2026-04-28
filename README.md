@@ -11,6 +11,12 @@ cargo build --release
 ./target/release/seqit --help
 ```
 
+BAM/CRAM statistics require the optional HTSlib-backed feature:
+
+```bash
+cargo build --release --features hts
+```
+
 ## Quick start
 
 ```bash
@@ -54,8 +60,8 @@ Supported formats:
 
 - FASTA
 - FASTQ
-- SAM (`stats` supports basic counting)
-- BAM/CRAM are scaffolded/detected for future support
+- SAM (`stats` computes sequence metrics from SAM records)
+- BAM/CRAM (`stats`, when built with `--features hts`)
 
 Compression codecs:
 
