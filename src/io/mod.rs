@@ -388,9 +388,36 @@ where
     })
 }
 
+pub(crate) fn for_each_record_from_reader_with_header_parsing<F>(
+    br: DynBufReader,
+    fmt: SeqFormat,
+    parse_headers: bool,
+    mut f: F,
+) -> Result<()>
+where
+    F: for<'a> FnMut(SeqRecordRef<'a>) -> Result<()>,
+{
+    for_each_record_from_reader_until_with_header_parsing(br, fmt, parse_headers, |rec| {
+        f(rec)?;
+        Ok(true)
+    })
+}
+
 pub(crate) fn for_each_record_from_reader_until<F>(
     br: DynBufReader,
     fmt: SeqFormat,
+    f: F,
+) -> Result<()>
+where
+    F: for<'a> FnMut(SeqRecordRef<'a>) -> Result<bool>,
+{
+    for_each_record_from_reader_until_with_header_parsing(br, fmt, true, f)
+}
+
+pub(crate) fn for_each_record_from_reader_until_with_header_parsing<F>(
+    br: DynBufReader,
+    fmt: SeqFormat,
+    parse_headers: bool,
     mut f: F,
 ) -> Result<()>
 where
@@ -399,6 +426,9 @@ where
     match fmt {
         SeqFormat::Fasta | SeqFormat::Fastq => {
             let mut reader = fastx::Reader::from_reader(br);
+            if !parse_headers {
+                reader.skip_id_parsing();
+            }
             while let Some(record) = reader.next()? {
                 if fmt == SeqFormat::Fastq && record.qual.is_none() {
                     bail!("expected FASTQ input but found FASTA records");

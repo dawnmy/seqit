@@ -73,6 +73,17 @@ fn seq_accepts_wrapped_fastq_records() {
 }
 
 #[test]
+fn seq_default_preserves_raw_header_spacing() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", "--format", "fasta"])
+        .write_stdin(">r1   desc\tmore\nACGT\n")
+        .assert()
+        .success()
+        .stdout(">r1   desc\tmore\nACGT\n");
+}
+
+#[test]
 fn fq2fa_accepts_wrapped_fastq_records() {
     Command::cargo_bin("seqit")
         .unwrap()

@@ -12,6 +12,7 @@ pub(super) struct Reader<R: BufRead> {
     line_buf: Vec<u8>,
     lookahead_line: Vec<u8>,
     has_lookahead: bool,
+    parse_id: bool,
 }
 
 pub(super) struct Record<'a> {
@@ -30,7 +31,12 @@ impl<R: BufRead> Reader<R> {
             line_buf: Vec::with_capacity(1024),
             lookahead_line: Vec::with_capacity(1024),
             has_lookahead: false,
+            parse_id: true,
         }
+    }
+
+    pub fn skip_id_parsing(&mut self) {
+        self.parse_id = false;
     }
 
     pub fn next(&mut self) -> Result<Option<Record<'_>>> {
@@ -101,7 +107,11 @@ impl<R: BufRead> Reader<R> {
             }
         }
 
-        let (id, desc) = parse_header(&self.record_buf[..header_end]);
+        let (id, desc) = if self.parse_id {
+            parse_header(&self.record_buf[..header_end])
+        } else {
+            (&self.record_buf[..header_end], None)
+        };
         let seq = &self.record_buf[header_end..seq_end];
         let qual = self.is_fastq.then_some(&self.record_buf[seq_end..]);
         Ok(Some(Record {
@@ -386,6 +396,18 @@ mod tests {
         assert_eq!(records[0].1.as_deref(), Some(&b"desc"[..]));
         assert_eq!(records[0].2, b"ACGT");
         assert_eq!(records[0].3.as_deref(), Some(&b"IIII"[..]));
+    }
+
+    #[test]
+    fn can_skip_id_parsing_for_raw_header_output() {
+        let cursor = Cursor::new(b">r1   desc\tmore\nACGT\n");
+        let mut reader = Reader::from_reader(BufReader::with_capacity(8, cursor));
+        reader.skip_id_parsing();
+
+        let record = reader.next().unwrap().unwrap();
+        assert_eq!(record.id, b"r1   desc\tmore");
+        assert_eq!(record.desc, None);
+        assert_eq!(record.seq, b"ACGT");
     }
 
     #[test]
