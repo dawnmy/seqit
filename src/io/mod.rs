@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::str;
 
 use anyhow::{bail, Context, Result};
@@ -8,13 +8,17 @@ use anyhow::{bail, Context, Result};
 use crate::cli::{CompressionArg, FormatArg};
 use crate::formats::{SeqFormat, SeqRecord};
 
+mod aligned;
 mod fastx;
 
+use aligned::AlignedBufReader;
+
 pub const BUFFER_SIZE: usize = 1024 * 1024;
+const BUFFER_ALIGNMENT: usize = 64;
 const PARALLEL_GZIP_LEVEL: u32 = 3;
 
 pub type DynReader = Box<dyn Read + Send>;
-pub type DynBufReader = BufReader<DynReader>;
+pub type DynBufReader = AlignedBufReader<DynReader>;
 pub type DynWriter = Box<dyn Write>;
 pub type DynSendWriter = Box<dyn Write + Send>;
 
@@ -36,7 +40,7 @@ pub fn open_writer(path: &str) -> Result<DynSendWriter> {
 }
 
 pub fn buffered_reader(reader: DynReader) -> DynBufReader {
-    BufReader::with_capacity(BUFFER_SIZE, reader)
+    AlignedBufReader::with_capacity_alignment(BUFFER_SIZE, BUFFER_ALIGNMENT, reader)
 }
 
 pub fn buffered_writer(writer: DynWriter) -> BufWriter<DynWriter> {
@@ -50,10 +54,10 @@ pub fn wrap_decompress(
 ) -> Result<DynReader> {
     match detect_compression(path, mode) {
         CompressionArg::Gz => Ok(Box::new(flate2::bufread::MultiGzDecoder::new(
-            BufReader::with_capacity(BUFFER_SIZE, reader),
+            buffered_reader(reader),
         ))),
         CompressionArg::Xz => Ok(Box::new(xz2::bufread::XzDecoder::new_multi_decoder(
-            BufReader::with_capacity(BUFFER_SIZE, reader),
+            buffered_reader(reader),
         ))),
         _ => Ok(reader),
     }

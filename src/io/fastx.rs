@@ -40,7 +40,7 @@ impl<R: BufRead> Reader<R> {
             if !self.read_next_nonempty_line()? {
                 return Ok(None);
             }
-            self.is_fastq = match trim_crlf(&self.line_buf).first().copied() {
+            self.is_fastq = match self.line_buf.first().copied() {
                 Some(b'>') => false,
                 Some(b'@') => true,
                 _ => bail!("invalid FASTA/FASTQ record: expected '>' or '@' header"),
@@ -50,19 +50,29 @@ impl<R: BufRead> Reader<R> {
             self.has_lookahead = false;
         }
 
-        let header_line = trim_crlf(&self.line_buf);
-        if header_line.is_empty() {
+        if self.line_buf.is_empty() {
             bail!("invalid FASTA/FASTQ record: empty header line");
         }
-        self.record_buf.extend_from_slice(&header_line[1..]);
+        self.record_buf.extend_from_slice(&self.line_buf[1..]);
         let header_end = self.record_buf.len();
 
-        loop {
-            match self.read_next_nonempty_line_into_record_buf(true, self.is_fastq)? {
-                ReadLineOutcome::Eof | ReadLineOutcome::NextHeader | ReadLineOutcome::FastqSep => {
-                    break;
+        if self.is_fastq {
+            loop {
+                match self.read_next_nonempty_line_into_record_buf::<true, true>()? {
+                    ReadLineOutcome::Eof
+                    | ReadLineOutcome::NextHeader
+                    | ReadLineOutcome::FastqSep => break,
+                    ReadLineOutcome::Appended(_) => {}
                 }
-                ReadLineOutcome::Appended(_) => {}
+            }
+        } else {
+            loop {
+                match self.read_next_nonempty_line_into_record_buf::<true, false>()? {
+                    ReadLineOutcome::Eof
+                    | ReadLineOutcome::NextHeader
+                    | ReadLineOutcome::FastqSep => break,
+                    ReadLineOutcome::Appended(_) => {}
+                }
             }
         }
         let seq_end = self.record_buf.len();
@@ -71,7 +81,7 @@ impl<R: BufRead> Reader<R> {
             let seq_len = seq_end - header_end;
             let mut qual_read_len = 0usize;
             while qual_read_len < seq_len {
-                match self.read_next_nonempty_line_into_record_buf(false, false)? {
+                match self.read_qual_line_into_record_buf()? {
                     ReadLineOutcome::Eof => break,
                     ReadLineOutcome::Appended(len) => {
                         qual_read_len += len;
@@ -81,11 +91,7 @@ impl<R: BufRead> Reader<R> {
                             );
                         }
                     }
-                    ReadLineOutcome::NextHeader | ReadLineOutcome::FastqSep => {
-                        bail!(
-                            "FASTQ record has sequence length {seq_len} but quality length {qual_read_len}"
-                        );
-                    }
+                    ReadLineOutcome::NextHeader | ReadLineOutcome::FastqSep => unreachable!(),
                 }
             }
             if qual_read_len != seq_len {
@@ -106,103 +112,102 @@ impl<R: BufRead> Reader<R> {
         }))
     }
 
+    #[inline(always)]
     fn read_line_fill_buf(&mut self) -> io::Result<usize> {
         self.line_buf.clear();
+
         let mut total = 0usize;
         loop {
-            let (consumed, done) = {
-                let buf = self.reader.fill_buf()?;
-                if buf.is_empty() {
-                    return Ok(total);
+            let buf = self.reader.fill_buf()?;
+            if buf.is_empty() {
+                if self.line_buf.last() == Some(&b'\r') {
+                    self.line_buf.pop();
                 }
-                match memchr(b'\n', buf) {
-                    Some(pos) => {
-                        let end = pos + 1;
-                        self.line_buf.extend_from_slice(&buf[..end]);
-                        (end, true)
-                    }
-                    None => {
-                        self.line_buf.extend_from_slice(buf);
-                        (buf.len(), false)
-                    }
+                return Ok(total);
+            }
+
+            let (consumed, done) = match memchr(b'\n', buf) {
+                Some(pos) => {
+                    let end = pos + 1;
+                    self.line_buf.extend_from_slice(&buf[..end]);
+                    (end, true)
+                }
+                None => {
+                    self.line_buf.extend_from_slice(buf);
+                    (buf.len(), false)
                 }
             };
+
             self.reader.consume(consumed);
             total += consumed;
+
             if done {
+                self.line_buf.pop();
+                if self.line_buf.last() == Some(&b'\r') {
+                    self.line_buf.pop();
+                }
                 return Ok(total);
             }
         }
     }
 
+    #[inline(always)]
     fn read_next_nonempty_line(&mut self) -> Result<bool> {
         loop {
             let n = self.read_line_fill_buf()?;
             if n == 0 {
                 return Ok(false);
             }
-            if !trim_crlf(&self.line_buf).is_empty() {
+            if !self.line_buf.is_empty() {
                 return Ok(true);
             }
         }
     }
 
-    fn read_next_nonempty_line_into_record_buf(
+    #[inline(always)]
+    fn read_next_nonempty_line_into_record_buf<
+        const STOP_ON_FASTA_HEADER: bool,
+        const STOP_ON_FASTQ_SEP: bool,
+    >(
         &mut self,
-        stop_on_fasta_header: bool,
-        stop_on_fastq_sep: bool,
     ) -> Result<ReadLineOutcome> {
         loop {
-            let fast_path = {
-                let buf = self.reader.fill_buf()?;
-                if buf.is_empty() {
-                    return Ok(ReadLineOutcome::Eof);
-                }
-                memchr(b'\n', buf).map(|pos| {
-                    let consumed = pos + 1;
-                    let line = trim_crlf(&buf[..consumed]);
-                    let first_char = line.first().copied();
-                    let needs_copy = matches!(first_char, Some(b'>') if stop_on_fasta_header);
-                    (consumed, line.len(), first_char, needs_copy)
-                })
-            };
+            let buf = self.reader.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(ReadLineOutcome::Eof);
+            }
 
-            if let Some((consumed, line_len, first_char, needs_copy)) = fast_path {
+            if let Some(pos) = memchr(b'\n', buf) {
+                let consumed = pos + 1;
+                let line_len = trim_crlf(&buf[..consumed]).len();
+
                 if line_len == 0 {
                     self.reader.consume(consumed);
                     continue;
                 }
 
-                if needs_copy {
-                    let buf = self.reader.fill_buf()?;
+                let first_char = buf[0];
+                if STOP_ON_FASTA_HEADER && first_char == b'>' {
                     self.lookahead_line.clear();
-                    self.lookahead_line.extend_from_slice(&buf[..consumed]);
-                    self.has_lookahead = true;
+                    self.lookahead_line.extend_from_slice(&buf[..line_len]);
                     self.reader.consume(consumed);
+                    self.has_lookahead = true;
                     return Ok(ReadLineOutcome::NextHeader);
                 }
 
-                if matches!(first_char, Some(b'+') if stop_on_fastq_sep) {
+                if STOP_ON_FASTQ_SEP && first_char == b'+' {
                     self.reader.consume(consumed);
                     return Ok(ReadLineOutcome::FastqSep);
                 }
 
-                let buf = self.reader.fill_buf()?;
-                self.record_buf
-                    .extend_from_slice(trim_crlf(&buf[..consumed]));
+                self.record_buf.extend_from_slice(&buf[..line_len]);
                 self.reader.consume(consumed);
                 return Ok(ReadLineOutcome::Appended(line_len));
             }
 
-            let first_char = {
-                let buf = self.reader.fill_buf()?;
-                if buf.is_empty() {
-                    return Ok(ReadLineOutcome::Eof);
-                }
-                buf[0]
-            };
-            if !matches!(first_char, b'>' if stop_on_fasta_header)
-                && !matches!(first_char, b'+' if stop_on_fastq_sep)
+            let first_char = buf[0];
+            if !((STOP_ON_FASTA_HEADER && first_char == b'>')
+                || (STOP_ON_FASTQ_SEP && first_char == b'+'))
             {
                 return self.read_long_line_into_record_buf();
             }
@@ -210,25 +215,51 @@ impl<R: BufRead> Reader<R> {
             if self.read_line_fill_buf()? == 0 {
                 return Ok(ReadLineOutcome::Eof);
             }
-            let line = trim_crlf(&self.line_buf);
-            if line.is_empty() {
+            if self.line_buf.is_empty() {
                 continue;
             }
-            match line[0] {
-                b'>' if stop_on_fasta_header => {
-                    std::mem::swap(&mut self.line_buf, &mut self.lookahead_line);
-                    self.has_lookahead = true;
-                    return Ok(ReadLineOutcome::NextHeader);
-                }
-                b'+' if stop_on_fastq_sep => return Ok(ReadLineOutcome::FastqSep),
-                _ => {
-                    self.record_buf.extend_from_slice(line);
-                    return Ok(ReadLineOutcome::Appended(line.len()));
-                }
+
+            let first_char = self.line_buf[0];
+            if STOP_ON_FASTA_HEADER && first_char == b'>' {
+                std::mem::swap(&mut self.line_buf, &mut self.lookahead_line);
+                self.has_lookahead = true;
+                return Ok(ReadLineOutcome::NextHeader);
             }
+            if STOP_ON_FASTQ_SEP && first_char == b'+' {
+                return Ok(ReadLineOutcome::FastqSep);
+            }
+
+            let len = self.line_buf.len();
+            self.record_buf.extend_from_slice(&self.line_buf);
+            return Ok(ReadLineOutcome::Appended(len));
         }
     }
 
+    #[inline(always)]
+    fn read_qual_line_into_record_buf(&mut self) -> Result<ReadLineOutcome> {
+        loop {
+            let buf = self.reader.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(ReadLineOutcome::Eof);
+            }
+
+            if let Some(pos) = memchr(b'\n', buf) {
+                let consumed = pos + 1;
+                let line_len = trim_crlf(&buf[..consumed]).len();
+                if line_len == 0 {
+                    self.reader.consume(consumed);
+                    continue;
+                }
+                self.record_buf.extend_from_slice(&buf[..line_len]);
+                self.reader.consume(consumed);
+                return Ok(ReadLineOutcome::Appended(line_len));
+            }
+
+            return self.read_long_line_into_record_buf();
+        }
+    }
+
+    #[inline(always)]
     fn read_long_line_into_record_buf(&mut self) -> Result<ReadLineOutcome> {
         let mut line_len = 0usize;
         let mut pending_cr = false;
@@ -243,15 +274,15 @@ impl<R: BufRead> Reader<R> {
                     None
                 } else if let Some(pos) = memchr(b'\n', buf) {
                     let line = &buf[..pos];
-                    let trimmed_len = if line.last().is_some_and(|b| *b == b'\r') {
-                        line.len().saturating_sub(1)
+                    let trimmed_len = if line.ends_with(b"\r") {
+                        line.len() - 1
                     } else {
                         line.len()
                     };
                     Some((pos + 1, trimmed_len, true, pos == 0, line.ends_with(b"\r")))
                 } else {
-                    let trimmed_len = if buf.last().is_some_and(|b| *b == b'\r') {
-                        buf.len().saturating_sub(1)
+                    let trimmed_len = if buf.ends_with(b"\r") {
+                        buf.len() - 1
                     } else {
                         buf.len()
                     };
@@ -279,6 +310,7 @@ impl<R: BufRead> Reader<R> {
                 self.record_buf.extend_from_slice(data);
                 line_len += data.len();
             }
+
             pending_cr = ends_with_cr && !has_lf;
             self.reader.consume(consumed);
 
@@ -299,6 +331,7 @@ enum ReadLineOutcome {
     FastqSep,
 }
 
+#[inline]
 fn trim_crlf(line: &[u8]) -> &[u8] {
     let mut end = line.len();
     if end > 0 && line[end - 1] == b'\n' {
@@ -310,6 +343,7 @@ fn trim_crlf(line: &[u8]) -> &[u8] {
     &line[..end]
 }
 
+#[inline]
 fn parse_header(line: &[u8]) -> (&[u8], Option<&[u8]>) {
     let Some(id_end) = memchr2(b' ', b'\t', line) else {
         return (line, None);
@@ -320,4 +354,78 @@ fn parse_header(line: &[u8]) -> (&[u8], Option<&[u8]>) {
     }
     let desc = (desc_start < line.len()).then_some(&line[desc_start..]);
     (&line[..id_end], desc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reader;
+    use std::io::{BufReader, Cursor};
+
+    type OwnedRecord = (Vec<u8>, Option<Vec<u8>>, Vec<u8>, Option<Vec<u8>>);
+
+    fn read_to_owned(input: &[u8], capacity: usize) -> anyhow::Result<Vec<OwnedRecord>> {
+        let cursor = Cursor::new(input);
+        let mut reader = Reader::from_reader(BufReader::with_capacity(capacity, cursor));
+        let mut out = Vec::new();
+        while let Some(record) = reader.next()? {
+            out.push((
+                record.id.to_vec(),
+                record.desc.map(<[u8]>::to_vec),
+                record.seq.to_vec(),
+                record.qual.map(<[u8]>::to_vec),
+            ));
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn reads_wrapped_fastq_with_small_buffer_and_no_final_lf() {
+        let records = read_to_owned(b"@r1 desc\nAC\nGT\n+\nII\nII", 3).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, b"r1");
+        assert_eq!(records[0].1.as_deref(), Some(&b"desc"[..]));
+        assert_eq!(records[0].2, b"ACGT");
+        assert_eq!(records[0].3.as_deref(), Some(&b"IIII"[..]));
+    }
+
+    #[test]
+    fn keeps_line_buffer_small_for_long_sequence_lines() {
+        let seq = b"ACGT".repeat(4096);
+        let mut input = b">r1\n".to_vec();
+        input.extend_from_slice(&seq);
+        input.extend_from_slice(b"\n>r2\nTGCA");
+        let cursor = Cursor::new(input);
+        let mut reader = Reader::from_reader(BufReader::with_capacity(3, cursor));
+
+        let first = reader.next().unwrap().unwrap();
+        assert_eq!(first.id, b"r1");
+        assert_eq!(first.seq, seq);
+        assert!(reader.line_buf.capacity() < seq.len() / 2);
+
+        let second = reader.next().unwrap().unwrap();
+        assert_eq!(second.id, b"r2");
+        assert_eq!(second.seq, b"TGCA");
+    }
+
+    #[test]
+    fn accepts_crlf_and_skips_blank_lines() {
+        let records = read_to_owned(b"\r\n>r1\r\nAC\r\n\r\nGT\r\n>r2\r\nTGCA\r\n", 4).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].2, b"ACGT");
+        assert_eq!(records[1].2, b"TGCA");
+    }
+
+    #[test]
+    fn rejects_nonempty_invalid_first_line() {
+        let err = read_to_owned(b" \n", 8).unwrap_err().to_string();
+        assert!(err.contains("invalid FASTA/FASTQ record"));
+    }
+
+    #[test]
+    fn rejects_unequal_fastq_lengths() {
+        let err = read_to_owned(b"@r1\nACGT\n+\nIII\n", 8)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sequence length 4 but quality length 3"));
+    }
 }
