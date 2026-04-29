@@ -25,7 +25,14 @@ pub fn run(args: SeqArgs) -> Result<()> {
         .remove_gaps
         .then(|| parse_gap_letters(&args.gap_letters));
     let needs_owned = needs_owned_record(&args);
-    io::for_each_record_from_reader(br, fmt, |rec| {
+    let parse_headers = needs_parsed_header(&args);
+    let plain_output = can_write_plain_records(&args);
+    io::for_each_record_from_reader_with_header_parsing(br, fmt, parse_headers, |rec| {
+        if plain_output {
+            io::write_record_ref(&mut bw, fmt, &rec)?;
+            return Ok(());
+        }
+
         if needs_owned {
             let mut rec = rec.to_owned_record()?;
             if process_owned_record(&args, &gap_letters, &mut rec)? {
@@ -46,6 +53,22 @@ pub fn run(args: SeqArgs) -> Result<()> {
 
 fn needs_owned_record(args: &SeqArgs) -> bool {
     args.rev || args.comp || args.revcomp || args.upper || args.lower || args.remove_gaps
+}
+
+fn needs_parsed_header(args: &SeqArgs) -> bool {
+    args.only_id || (args.name && !args.full_name) || args.validate_seq
+}
+
+fn can_write_plain_records(args: &SeqArgs) -> bool {
+    !needs_owned_record(args)
+        && !needs_parsed_header(args)
+        && args.min_len.is_none()
+        && args.max_len.is_none()
+        && args.min_qual < 0.0
+        && args.max_qual < 0.0
+        && !args.seq
+        && !args.name
+        && !args.color
 }
 
 fn average_quality(qual: &[u8], ascii_base: u8) -> f64 {

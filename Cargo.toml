@@ -1,9 +1,13 @@
 [package]
 name = "seqit"
-version = "0.3.3"
+version = "0.3.6"
 edition = "2021"
 description = "Streaming-first Rust toolkit for biological sequence file operations"
 license = "MIT"
+
+[features]
+default = []
+hts = ["dep:rust-htslib"]
 
 [dependencies]
 anyhow = "1"
@@ -22,7 +26,7 @@ regex = "1"
 ahash = "0.8"
 bytecount = "0.6"
 num-format = "0.4"
-rust-htslib = { version = "0.51", default-features = false }
+rust-htslib = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

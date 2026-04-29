@@ -153,10 +153,15 @@ fn sample_paired_num_streaming(
     rng: &mut ChaCha20Rng,
     allow_unpaired: bool,
 ) -> Result<(Vec<SeqRecord>, Vec<SeqRecord>, usize)> {
+    if n == 0 {
+        return Ok((Vec::new(), Vec::new(), 0));
+    }
     let mut output = Vec::with_capacity(n);
     let mut valid_seen = 0usize;
     let mut invalid_preview = Vec::new();
     let mut invalid_count = 0usize;
+    let mut w = 0.0f64;
+    let mut gap_remaining = 0usize;
     io::for_each_fastq_pair(in1, in2, compression, |pair| {
         match pair {
             io::FastqPair::Both(a, b) => {
@@ -172,11 +177,17 @@ fn sample_paired_num_streaming(
                 valid_seen += 1;
                 if output.len() < n {
                     output.push((a.to_owned_record()?, b.to_owned_record()?));
-                } else if n > 0 {
-                    let j = rng.random_range(0..valid_seen);
-                    if j < n {
-                        output[j] = (a.to_owned_record()?, b.to_owned_record()?);
+                    if output.len() == n {
+                        w = (sample_open01(rng).ln() / n as f64).exp();
+                        gap_remaining = sample_gap(w, rng);
                     }
+                } else if gap_remaining > 0 {
+                    gap_remaining -= 1;
+                } else {
+                    let j = rng.random_range(0..n);
+                    output[j] = (a.to_owned_record()?, b.to_owned_record()?);
+                    w *= (sample_open01(rng).ln() / n as f64).exp();
+                    gap_remaining = sample_gap(w, rng);
                 }
             }
             io::FastqPair::Left(a) => {
