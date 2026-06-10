@@ -709,8 +709,8 @@ fn aggregate_row(rows: &[StatRow]) -> StatRow {
     let q30_pct = weighted_opt_pct(rows, |r| r.q30_pct);
     StatRow {
         file: "TOTAL".to_string(),
-        format: "mixed".to_string(),
-        seq_type: "mixed".to_string(),
+        format: aggregate_label(rows, |r| &r.format),
+        seq_type: aggregate_label(rows, |r| &r.seq_type),
         records,
         total_bases,
         min_len,
@@ -726,6 +726,17 @@ fn aggregate_row(rows: &[StatRow]) -> StatRow {
         q10_pct,
         q20_pct,
         q30_pct,
+    }
+}
+
+fn aggregate_label(rows: &[StatRow], pick: fn(&StatRow) -> &str) -> String {
+    let Some(first) = rows.first().map(pick) else {
+        return "mixed".to_string();
+    };
+    if rows.iter().all(|r| pick(r) == first) {
+        first.to_string()
+    } else {
+        "mixed".to_string()
     }
 }
 
@@ -971,11 +982,14 @@ fn seq_line_metrics(seq: &[u8]) -> SeqLineMetrics {
             continue;
         }
         metrics.alpha += 1;
-        match b.to_ascii_uppercase() {
+        let up = b.to_ascii_uppercase();
+        match up {
             b'U' => metrics.u += 1,
             b'T' => metrics.t += 1,
-            b'A' | b'C' | b'G' | b'N' => {}
-            _ => metrics.non_nuc_alpha += 1,
+            _ => {}
+        }
+        if !is_iupac_nucleotide(up) {
+            metrics.non_nuc_alpha += 1;
         }
     }
     metrics
@@ -1001,10 +1015,31 @@ fn update_seq_type_counts(seq: &[u8], counts: &mut SeqTypeCounts) {
             b'T' => counts.t += 1,
             _ => {}
         }
-        if !matches!(up, b'A' | b'C' | b'G' | b'T' | b'U' | b'N') {
+        if !is_iupac_nucleotide(up) {
             counts.non_nuc_alpha += 1;
         }
     }
+}
+
+fn is_iupac_nucleotide(up: u8) -> bool {
+    matches!(
+        up,
+        b'A' | b'C'
+            | b'G'
+            | b'T'
+            | b'U'
+            | b'R'
+            | b'Y'
+            | b'S'
+            | b'W'
+            | b'K'
+            | b'M'
+            | b'B'
+            | b'D'
+            | b'H'
+            | b'V'
+            | b'N'
+    )
 }
 
 fn infer_seq_type(counts: SeqTypeCounts) -> String {

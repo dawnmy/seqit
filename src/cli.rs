@@ -265,7 +265,7 @@ pub struct SeqArgs {
         short = 'v',
         long = "validate-seq",
         action = ArgAction::SetTrue,
-        help = "Validate sequence characters against IUPAC nucleotide codes"
+        help = "Validate sequence characters against IUPAC nucleotide codes, or amino-acid codes for FASTA protein records"
     )]
     pub validate_seq: bool,
 }
