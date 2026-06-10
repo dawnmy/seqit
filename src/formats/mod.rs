@@ -36,7 +36,14 @@ impl SeqFormat {
             .strip_suffix(".gz")
             .or_else(|| p.strip_suffix(".xz"))
             .unwrap_or(p);
-        if stripped.ends_with(".fa") || stripped.ends_with(".fasta") || stripped.ends_with(".fna") {
+        if stripped.ends_with(".fa")
+            || stripped.ends_with(".fasta")
+            || stripped.ends_with(".fna")
+            || stripped.ends_with(".faa")
+            || stripped.ends_with(".fas")
+            || stripped.ends_with(".ffn")
+            || stripped.ends_with(".frn")
+        {
             Ok(Self::Fasta)
         } else if stripped.ends_with(".fq") || stripped.ends_with(".fastq") {
             Ok(Self::Fastq)

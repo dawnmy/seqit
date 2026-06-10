@@ -35,13 +35,13 @@ pub fn run(args: SeqArgs) -> Result<()> {
 
         if needs_owned {
             let mut rec = rec.to_owned_record()?;
-            if process_owned_record(&args, &gap_letters, &mut rec)? {
+            if process_owned_record(&args, fmt, &gap_letters, &mut rec)? {
                 write_record(&args, fmt, &mut bw, &rec)?;
             }
             return Ok(());
         }
 
-        if process_record_ref(&args, &rec)? {
+        if process_record_ref(&args, fmt, &rec)? {
             write_record_ref(&args, fmt, &mut bw, &rec)?;
         }
         Ok(())
@@ -86,7 +86,7 @@ fn parse_gap_letters(gap_letters: &str) -> HashSet<u8> {
     gap_letters.as_bytes().iter().copied().collect()
 }
 
-fn find_invalid_iupac(seq: &[u8]) -> Option<u8> {
+fn find_invalid_iupac_nucleotide(seq: &[u8]) -> Option<u8> {
     seq.iter().copied().find(|b| {
         !matches!(
             b.to_ascii_uppercase(),
@@ -109,7 +109,84 @@ fn find_invalid_iupac(seq: &[u8]) -> Option<u8> {
     })
 }
 
-fn process_record_ref(args: &SeqArgs, rec: &io::SeqRecordRef<'_>) -> Result<bool> {
+fn find_invalid_iupac_amino_acid(seq: &[u8]) -> Option<u8> {
+    seq.iter().copied().find(|b| {
+        !matches!(
+            b.to_ascii_uppercase(),
+            b'A' | b'C'
+                | b'D'
+                | b'E'
+                | b'F'
+                | b'G'
+                | b'H'
+                | b'I'
+                | b'K'
+                | b'L'
+                | b'M'
+                | b'N'
+                | b'P'
+                | b'Q'
+                | b'R'
+                | b'S'
+                | b'T'
+                | b'V'
+                | b'W'
+                | b'Y'
+                | b'B'
+                | b'Z'
+                | b'J'
+                | b'X'
+                | b'U'
+                | b'O'
+                | b'*'
+        )
+    })
+}
+
+fn find_invalid_sequence_char(fmt: SeqFormat, seq: &[u8]) -> Option<u8> {
+    let invalid_nuc = find_invalid_iupac_nucleotide(seq);
+    if invalid_nuc.is_none() {
+        return None;
+    }
+    if fmt == SeqFormat::Fasta && find_invalid_iupac_amino_acid(seq).is_none() {
+        return None;
+    }
+    invalid_nuc
+}
+
+fn is_likely_protein(seq: &[u8]) -> bool {
+    let mut alpha = 0usize;
+    let mut non_nucleotide = 0usize;
+    for &b in seq {
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
+        alpha += 1;
+        if !matches!(
+            b.to_ascii_uppercase(),
+            b'A' | b'C'
+                | b'G'
+                | b'T'
+                | b'U'
+                | b'R'
+                | b'Y'
+                | b'S'
+                | b'W'
+                | b'K'
+                | b'M'
+                | b'B'
+                | b'D'
+                | b'H'
+                | b'V'
+                | b'N'
+        ) {
+            non_nucleotide += 1;
+        }
+    }
+    alpha > 0 && (non_nucleotide as f64 / alpha as f64) > 0.05
+}
+
+fn process_record_ref(args: &SeqArgs, fmt: SeqFormat, rec: &io::SeqRecordRef<'_>) -> Result<bool> {
     let len = rec.seq.len();
     let len_ok = args.min_len.map(|m| len >= m).unwrap_or(true)
         && args.max_len.map(|m| len <= m).unwrap_or(true);
@@ -131,9 +208,9 @@ fn process_record_ref(args: &SeqArgs, rec: &io::SeqRecordRef<'_>) -> Result<bool
     }
 
     if args.validate_seq {
-        if let Some(ch) = find_invalid_iupac(&rec.seq) {
+        if let Some(ch) = find_invalid_sequence_char(fmt, &rec.seq) {
             bail!(
-                "record '{}' contains invalid base '{}'",
+                "record '{}' contains invalid sequence character '{}'",
                 rec.id_str()?,
                 ch as char
             );
@@ -145,6 +222,7 @@ fn process_record_ref(args: &SeqArgs, rec: &io::SeqRecordRef<'_>) -> Result<bool
 
 fn process_owned_record(
     args: &SeqArgs,
+    fmt: SeqFormat,
     gap_letters: &Option<HashSet<u8>>,
     rec: &mut SeqRecord,
 ) -> Result<bool> {
@@ -166,6 +244,13 @@ fn process_owned_record(
         {
             return Ok(false);
         }
+    }
+
+    if (args.comp || args.revcomp) && fmt == SeqFormat::Fasta && is_likely_protein(&rec.seq) {
+        bail!(
+            "record '{}' appears to be protein; --comp/--revcomp only apply to nucleotide sequences",
+            rec.id
+        );
     }
 
     if args.revcomp {
@@ -194,8 +279,12 @@ fn process_owned_record(
         rec.seq.retain(|b| !gaps.contains(b));
     }
     if args.validate_seq {
-        if let Some(ch) = find_invalid_iupac(&rec.seq) {
-            bail!("record '{}' contains invalid base '{}'", rec.id, ch as char);
+        if let Some(ch) = find_invalid_sequence_char(fmt, &rec.seq) {
+            bail!(
+                "record '{}' contains invalid sequence character '{}'",
+                rec.id,
+                ch as char
+            );
         }
     }
 

@@ -578,6 +578,105 @@ fn stats_reports_sequence_type_dna_rna_protein() {
 }
 
 #[test]
+fn stats_total_preserves_shared_format_and_type() {
+    let td = tempdir().unwrap();
+    let a = td.path().join("a.fa");
+    let b = td.path().join("b.fa");
+    fs::write(&a, ">a1\nACGT\n").unwrap();
+    fs::write(&b, ">b1\nTGCA\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", a.to_str().unwrap(), b.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("| TOTAL"))
+        .stdout(contains("| fasta  | DNA"));
+}
+
+#[test]
+fn fasta_protein_extension_stats_and_validation_are_supported() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(&input, ">p1\nMKWVTFISLLLLFSSAYS\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfasta\tprotein\t1\t18"));
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", input.to_str().unwrap(), "--validate-seq", "--quiet"])
+        .assert()
+        .success()
+        .stdout(contains(">p1\nMKWVTFISLLLLFSSAYS\n"));
+}
+
+#[test]
+fn seq_rejects_complementing_protein_fasta() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", "--format", "fasta", "--comp", "--quiet"])
+        .write_stdin(">p1\nMKWVTFISLLLLFSSAYS\n")
+        .assert()
+        .failure()
+        .stderr(contains("appears to be protein"));
+}
+
+#[test]
+fn seq_filters_protein_fasta_by_length() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(&input, ">short\nMKWV\n>long\nMKWVTFISLLLLFSSAYS\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            input.to_str().unwrap(),
+            "--min-len",
+            "5",
+            "--max-len",
+            "18",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(">long\nMKWVTFISLLLLFSSAYS\n"))
+        .stdout(contains(">short").not());
+}
+
+#[test]
+fn grep_matches_protein_fasta_sequence() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(
+        &input,
+        ">p1\nMKWVTFISLLLLFSSAYS\n>p2\nGAVLIPFYWSTCMNQDEKRH\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "grep",
+            input.to_str().unwrap(),
+            "--by",
+            "seq",
+            "--pattern",
+            "FISL",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(">p1\nMKWVTFISLLLLFSSAYS\n"))
+        .stdout(contains(">p2").not());
+}
+
+#[test]
 fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
     Command::cargo_bin("seqit")
         .unwrap()
