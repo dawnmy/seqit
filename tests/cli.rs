@@ -690,6 +690,21 @@ fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
 }
 
 #[test]
+fn stats_all_mode_reports_fastq_error_rate_pct() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("error-rate.fq");
+    fs::write(&input, "@q0\nACGT\n+\n!!!!\n@q20\nACGT\n+\n5555\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("error_rate_pct"))
+        .stdout(contains("50.50%"));
+}
+
+#[test]
 fn stats_all_mode_shows_na_for_mixed_assembly_and_read_only_metrics() {
     Command::cargo_bin("seqit")
         .unwrap()
@@ -757,6 +772,27 @@ fn stats_sam_gz_reports_sequence_metrics() {
         .assert()
         .success()
         .stdout(contains("\tsam\tDNA\t2\t10\t4\t6\t5.000\t60.000\t6"));
+}
+
+#[test]
+fn stats_all_mode_hides_quality_stats_for_non_fastq_input() {
+    let td = tempdir().unwrap();
+    let sam_path = td.path().join("tiny.sam");
+    fs::write(
+        &sam_path,
+        "@HD\tVN:1.6\nr1\t0\t*\t0\t0\t*\t*\t0\t0\tACGT\tIIII\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", sam_path.to_str().unwrap(), "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("q10_pct").not())
+        .stdout(contains("q20_pct").not())
+        .stdout(contains("q30_pct").not())
+        .stdout(contains("error_rate_pct").not());
 }
 
 #[test]

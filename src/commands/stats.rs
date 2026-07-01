@@ -72,6 +72,9 @@ struct StatRow {
     q10_pct: Option<f64>,
     q20_pct: Option<f64>,
     q30_pct: Option<f64>,
+    error_rate_pct: Option<f64>,
+    #[serde(skip)]
+    qual_bases: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -306,7 +309,7 @@ fn build_fasta_row(file: &str, mut reader: impl BufRead) -> Result<StatRow> {
         acc,
         lens,
         n_bases,
-        (None, None, None),
+        (None, None, None, None, 0),
         type_counts,
     )
 }
@@ -318,6 +321,7 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead, compute_quality: bool) 
     let mut q_ge_10 = 0usize;
     let mut q_ge_20 = 0usize;
     let mut q_ge_30 = 0usize;
+    let mut error_sum = 0.0f64;
     let mut qual_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
     let mut line = Vec::new();
@@ -385,6 +389,7 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead, compute_quality: bool) 
                     if phred >= 30 {
                         q_ge_30 += 1;
                     }
+                    error_sum += phred_error_probability(phred);
                     qual_bases += 1;
                 }
             }
@@ -404,9 +409,11 @@ fn build_fastq_row(file: &str, mut reader: impl BufRead, compute_quality: bool) 
             Some(calc_pct(q_ge_10, qual_bases)),
             Some(calc_pct(q_ge_20, qual_bases)),
             Some(calc_pct(q_ge_30, qual_bases)),
+            Some(calc_error_rate_pct(error_sum, qual_bases)),
+            qual_bases,
         )
     } else {
-        (None, None, None)
+        (None, None, None, None, 0)
     };
     finalize_seq_row(
         file,
@@ -425,7 +432,7 @@ fn finalize_seq_row(
     acc: SeqAcc,
     lens: LenDist,
     n_bases: usize,
-    q_pcts: (Option<f64>, Option<f64>, Option<f64>),
+    q_pcts: (Option<f64>, Option<f64>, Option<f64>, Option<f64>, usize),
     type_counts: SeqTypeCounts,
 ) -> Result<StatRow> {
     let records = acc.records;
@@ -445,7 +452,7 @@ fn finalize_seq_row(
     let (n50, l50) = lens.nx_lx(50.0);
     let (q1_len, median_len, q3_len) = lens.quartiles();
     let n_pct = calc_pct(n_bases, total_bases);
-    let (q10_pct, q20_pct, q30_pct) = q_pcts;
+    let (q10_pct, q20_pct, q30_pct, error_rate_pct, qual_bases) = q_pcts;
     Ok(StatRow {
         file: file.to_string(),
         format: format!("{:?}", fmt).to_lowercase(),
@@ -465,6 +472,8 @@ fn finalize_seq_row(
         q10_pct,
         q20_pct,
         q30_pct,
+        error_rate_pct,
+        qual_bases,
     })
 }
 
@@ -478,6 +487,7 @@ fn build_sam_row_streaming(p: &str, compute_quality: bool) -> Result<StatRow> {
     let mut q_ge_10 = 0usize;
     let mut q_ge_20 = 0usize;
     let mut q_ge_30 = 0usize;
+    let mut error_sum = 0.0f64;
     let mut qual_bases = 0usize;
     let mut type_counts = SeqTypeCounts::default();
     let mut line = Vec::new();
@@ -522,6 +532,7 @@ fn build_sam_row_streaming(p: &str, compute_quality: bool) -> Result<StatRow> {
                     if phred >= 30 {
                         q_ge_30 += 1;
                     }
+                    error_sum += phred_error_probability(phred);
                     qual_bases += 1;
                 }
             }
@@ -535,9 +546,11 @@ fn build_sam_row_streaming(p: &str, compute_quality: bool) -> Result<StatRow> {
             Some(calc_pct(q_ge_10, qual_bases)),
             Some(calc_pct(q_ge_20, qual_bases)),
             Some(calc_pct(q_ge_30, qual_bases)),
+            Some(calc_error_rate_pct(error_sum, qual_bases)),
+            qual_bases,
         )
     } else {
-        (None, None, None)
+        (None, None, None, None, 0)
     };
 
     finalize_seq_row(p, SeqFormat::Sam, acc, lens, n_bases, q_pcts, type_counts)
@@ -588,6 +601,7 @@ fn build_hts_row(
     let mut q_ge_10 = 0usize;
     let mut q_ge_20 = 0usize;
     let mut q_ge_30 = 0usize;
+    let mut error_sum = 0.0f64;
     let mut qual_bases = 0usize;
     let mut lens = LenDist::default();
     let mut type_counts = SeqTypeCounts::default();
@@ -618,6 +632,7 @@ fn build_hts_row(
                 if phred >= 30 {
                     q_ge_30 += 1;
                 }
+                error_sum += phred_error_probability(phred);
                 qual_bases += 1;
             }
         }
@@ -661,6 +676,8 @@ fn build_hts_row(
         q10_pct: compute_quality.then_some(calc_pct(q_ge_10, qual_bases)),
         q20_pct: compute_quality.then_some(calc_pct(q_ge_20, qual_bases)),
         q30_pct: compute_quality.then_some(calc_pct(q_ge_30, qual_bases)),
+        error_rate_pct: compute_quality.then_some(calc_error_rate_pct(error_sum, qual_bases)),
+        qual_bases,
     })
 }
 
@@ -707,6 +724,8 @@ fn aggregate_row(rows: &[StatRow]) -> StatRow {
     let q10_pct = weighted_opt_pct(rows, |r| r.q10_pct);
     let q20_pct = weighted_opt_pct(rows, |r| r.q20_pct);
     let q30_pct = weighted_opt_pct(rows, |r| r.q30_pct);
+    let error_rate_pct = weighted_quality_pct(rows, |r| r.error_rate_pct);
+    let qual_bases: usize = rows.iter().map(|r| r.qual_bases).sum();
     StatRow {
         file: "TOTAL".to_string(),
         format: aggregate_label(rows, |r| &r.format),
@@ -726,6 +745,8 @@ fn aggregate_row(rows: &[StatRow]) -> StatRow {
         q10_pct,
         q20_pct,
         q30_pct,
+        error_rate_pct,
+        qual_bases,
     }
 }
 
@@ -765,6 +786,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
                 "q10_pct".to_string(),
                 "q20_pct".to_string(),
                 "q30_pct".to_string(),
+                "error_rate_pct".to_string(),
             ]);
         }
         out
@@ -812,6 +834,7 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
                         display_opt_pct(r.q10_pct),
                         display_opt_pct(r.q20_pct),
                         display_opt_pct(r.q30_pct),
+                        display_opt_pct(r.error_rate_pct),
                     ]);
                 }
                 out
@@ -871,8 +894,8 @@ fn print_pretty_table(rows: &[StatRow], all: bool, all_columns: AllColumns) {
 
 fn choose_all_columns(rows: &[StatRow]) -> AllColumns {
     let has_assembly = rows.iter().any(|r| is_assembly(&r.format));
-    let has_reads = rows.iter().any(|r| is_read_or_alignment(&r.format));
-    match (has_assembly, has_reads) {
+    let has_fastq = rows.iter().any(|r| is_fastq(&r.format));
+    match (has_assembly, has_fastq) {
         (true, true) => AllColumns {
             show_nx: true,
             show_qx: true,
@@ -896,8 +919,8 @@ fn is_assembly(format: &str) -> bool {
     format == "fasta"
 }
 
-fn is_read_or_alignment(format: &str) -> bool {
-    matches!(format, "fastq" | "sam" | "bam" | "cram")
+fn is_fastq(format: &str) -> bool {
+    format == "fastq"
 }
 
 fn print_tsv_all_header(columns: AllColumns) {
@@ -920,7 +943,7 @@ fn print_tsv_all_header(columns: AllColumns) {
         headers.extend(["n50", "l50"]);
     }
     if columns.show_qx {
-        headers.extend(["q10_pct", "q20_pct", "q30_pct"]);
+        headers.extend(["q10_pct", "q20_pct", "q30_pct", "error_rate_pct"]);
     }
     println!("{}", headers.join("\t"));
 }
@@ -952,6 +975,7 @@ fn tsv_all_row(r: &StatRow, columns: AllColumns) -> String {
             display_opt_pct(r.q10_pct),
             display_opt_pct(r.q20_pct),
             display_opt_pct(r.q30_pct),
+            display_opt_pct(r.error_rate_pct),
         ]);
     }
     fields.join("\t")
@@ -1077,6 +1101,34 @@ fn weighted_opt_pct(rows: &[StatRow], pick: fn(&StatRow) -> Option<f64>) -> Opti
         None
     } else {
         Some(weighted / denom as f64)
+    }
+}
+
+fn weighted_quality_pct(rows: &[StatRow], pick: fn(&StatRow) -> Option<f64>) -> Option<f64> {
+    let mut weighted = 0.0f64;
+    let mut denom = 0usize;
+    for r in rows {
+        if let Some(v) = pick(r) {
+            weighted += v * (r.qual_bases as f64);
+            denom += r.qual_bases;
+        }
+    }
+    if denom == 0 {
+        None
+    } else {
+        Some(weighted / denom as f64)
+    }
+}
+
+fn phred_error_probability(phred: u8) -> f64 {
+    10f64.powf(-(phred as f64) / 10.0)
+}
+
+fn calc_error_rate_pct(error_sum: f64, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        error_sum * 100.0 / denominator as f64
     }
 }
 
