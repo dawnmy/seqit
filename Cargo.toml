@@ -1,8 +1,8 @@
 [package]
 name = "seqit"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
-description = "Streaming-first Rust toolkit for biological sequence file operations"
+description = "Highly efficient toolkit for biological sequence file operations"
 license = "MIT"
 
 [features]
