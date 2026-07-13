@@ -578,6 +578,105 @@ fn stats_reports_sequence_type_dna_rna_protein() {
 }
 
 #[test]
+fn stats_total_preserves_shared_format_and_type() {
+    let td = tempdir().unwrap();
+    let a = td.path().join("a.fa");
+    let b = td.path().join("b.fa");
+    fs::write(&a, ">a1\nACGT\n").unwrap();
+    fs::write(&b, ">b1\nTGCA\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", a.to_str().unwrap(), b.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("| TOTAL"))
+        .stdout(contains("| fasta  | DNA"));
+}
+
+#[test]
+fn fasta_protein_extension_stats_and_validation_are_supported() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(&input, ">p1\nMKWVTFISLLLLFSSAYS\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T"])
+        .assert()
+        .success()
+        .stdout(contains("\tfasta\tprotein\t1\t18"));
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", input.to_str().unwrap(), "--validate-seq", "--quiet"])
+        .assert()
+        .success()
+        .stdout(contains(">p1\nMKWVTFISLLLLFSSAYS\n"));
+}
+
+#[test]
+fn seq_rejects_complementing_protein_fasta() {
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["seq", "--format", "fasta", "--comp", "--quiet"])
+        .write_stdin(">p1\nMKWVTFISLLLLFSSAYS\n")
+        .assert()
+        .failure()
+        .stderr(contains("appears to be protein"));
+}
+
+#[test]
+fn seq_filters_protein_fasta_by_length() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(&input, ">short\nMKWV\n>long\nMKWVTFISLLLLFSSAYS\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "seq",
+            input.to_str().unwrap(),
+            "--min-len",
+            "5",
+            "--max-len",
+            "18",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(">long\nMKWVTFISLLLLFSSAYS\n"))
+        .stdout(contains(">short").not());
+}
+
+#[test]
+fn grep_matches_protein_fasta_sequence() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("proteins.faa");
+    fs::write(
+        &input,
+        ">p1\nMKWVTFISLLLLFSSAYS\n>p2\nGAVLIPFYWSTCMNQDEKRH\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args([
+            "grep",
+            input.to_str().unwrap(),
+            "--by",
+            "seq",
+            "--pattern",
+            "FISL",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout(contains(">p1\nMKWVTFISLLLLFSSAYS\n"))
+        .stdout(contains(">p2").not());
+}
+
+#[test]
 fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
     Command::cargo_bin("seqit")
         .unwrap()
@@ -588,6 +687,21 @@ fn stats_all_mode_hides_n50_l50_for_fastq_only_input() {
         .stdout(contains("q20_pct"))
         .stdout(contains("q30_pct"))
         .stdout(predicates::str::is_match("n50\\tl50").unwrap().not());
+}
+
+#[test]
+fn stats_all_mode_reports_fastq_error_rate_pct() {
+    let td = tempdir().unwrap();
+    let input = td.path().join("error-rate.fq");
+    fs::write(&input, "@q0\nACGT\n+\n!!!!\n@q20\nACGT\n+\n5555\n").unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", input.to_str().unwrap(), "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("error_rate_pct"))
+        .stdout(contains("50.50%"));
 }
 
 #[test]
@@ -658,6 +772,27 @@ fn stats_sam_gz_reports_sequence_metrics() {
         .assert()
         .success()
         .stdout(contains("\tsam\tDNA\t2\t10\t4\t6\t5.000\t60.000\t6"));
+}
+
+#[test]
+fn stats_all_mode_hides_quality_stats_for_non_fastq_input() {
+    let td = tempdir().unwrap();
+    let sam_path = td.path().join("tiny.sam");
+    fs::write(
+        &sam_path,
+        "@HD\tVN:1.6\nr1\t0\t*\t0\t0\t*\t*\t0\t0\tACGT\tIIII\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("seqit")
+        .unwrap()
+        .args(["stats", sam_path.to_str().unwrap(), "-T", "-a"])
+        .assert()
+        .success()
+        .stdout(contains("q10_pct").not())
+        .stdout(contains("q20_pct").not())
+        .stdout(contains("q30_pct").not())
+        .stdout(contains("error_rate_pct").not());
 }
 
 #[test]
